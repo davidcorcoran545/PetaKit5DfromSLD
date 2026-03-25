@@ -194,84 +194,134 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: convertSeriesToTif
+% some speed improvements (~4-5 times faster) with parfor and two other changes. 
+% It avoids copying the entire array every z-slice. 
+% It may run out of memory in some situations
+% Maybe bad if the size of each timepoint*number of cpu-cores is bigger than RAM. 
+% In future could limit the number of workers based on the size of a timepoint and the available ram
+
+% Also fixed a problem with original code not returning the correct time
+% metadata, possibly partly due to a slidebook bug
+
+% also check if it's doing the right thing with the number format,
+% previously it was storing each plane as a double in the array, this may
+% have changed to storing it as uint16. double may be necessary for later
+% maths calculations. 
+
 function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, psf_metadata)
-    size_metadata = getSizeMetadata(r,seriesIndex);
+    size_metadata = getSizeMetadata(r, seriesIndex);
     omeMeta = r.getMetadataStore();
     
-    % Calculate the deskewed Z spacing using the Z spacing value.
+    % Calculate the deskewed Z spacing
     deskewedZSpacing = sin(deg2rad(config.skewAngle)) * size_metadata.pixelSizeZ;
     
+    % Get time metadata using the main reader (r) before entering parfor    
+    % returns the time between the start of one timepoint and the start of the next timepoint 
+    % this is not actually completely consistent between timepoints for the 3i LLSM, it is usually within +-0.8 ms of the average
+    % I think this is small enough to ignore 
     frameInterval = 0;
-    plane_count = 0;
+    try
+        % slidebook or the LLSM has some weird bug where the time gap between the first and second timepoint
+        % is sometimes longer than the time gap between the second and third timepoint
+        % so ive changed the below to measure the time between 2nd and 3rd timepoint        
+        numPlanesInTimepoint = size_metadata.stackSizeZ * size_metadata.stackSizeC;
+        if size_metadata.stackSizeT > 2 && numPlanesInTimepoint < omeMeta.getPlaneCount(seriesIndex)
+            deltaTsecondTimepoint = omeMeta.getPlaneDeltaT(seriesIndex, numPlanesInTimepoint).value().doubleValue() / 1000;
+            deltaTthirdTimepoint = omeMeta.getPlaneDeltaT(seriesIndex, numPlanesInTimepoint*2).value().doubleValue() / 1000;           
+            frameInterval = deltaTthirdTimepoint - deltaTsecondTimepoint;
+        end
+    catch ME
+        % Display a descriptive error message including the filename
+        fprintf('Error retrieving time metadata, time metadata set to 0 for file: %s (Series %d)\n', sldFileName, seriesIndex);
+        fprintf('Reason: %s\n', ME.message);
+    end
     
-    % Create an output folder based on the series.
-    seriesName = char(omeMeta.getImageName(seriesIndex));
+    % Set up paths
     [~, baseFileName, ~] = fileparts(sldFileName);
     if endsWith(sldFileName, {'.sld','.sldy'}, 'IgnoreCase', true)
-    seriesNameNoSpaces = strrep(seriesName, ' ', '_');
-    currentSeriesFolder = [baseFileName, '_', seriesNameNoSpaces];
+        seriesName = char(omeMeta.getImageName(seriesIndex));
+        seriesNameNoSpaces = strrep(seriesName, ' ', '_');
+        currentSeriesFolder = [baseFileName, '_', seriesNameNoSpaces];
+    else
+        currentSeriesFolder = baseFileName;
+    end
+    
     currentSeriesPath = fullfile(config.inputFolder, currentSeriesFolder);
     if ~exist(currentSeriesPath, 'dir')
         mkdir(currentSeriesPath);
     end
-    else
-        currentSeriesFolder=baseFileName;
-        currentSeriesPath = fullfile(config.inputFolder, currentSeriesFolder);
-    end
+    
     tifDir = fullfile(currentSeriesPath, 'tifs');
     if ~exist(tifDir, 'dir')
         mkdir(tifDir);
     end
-    
-    fprintf('Series %d: Dimensions (X,Y,Z,C,T) = (%d,%d,%d,%d,%d)\n', ...
-             seriesIndex, size_metadata.stackSizeX, size_metadata.stackSizeY, size_metadata.stackSizeZ, size_metadata.stackSizeC, size_metadata.stackSizeT);
-    fprintf('Pixel Size (X,Y): (%.3f, %.3f) um, Z Spacing: %.2f um, Deskewed Z Spacing: %.3f um\n', ...
-             size_metadata.pixelSizeX, size_metadata.pixelSizeY, size_metadata.pixelSizeZ, deskewedZSpacing);
-    
-    if size_metadata.stackSizeZ <= 1
-        warning('Skipping series %d as it contains only one Z-slice.', seriesIndex);
-        seriesResult = [];
-        return;
-    end
-    
-    if endsWith(sldFileName, {'.tif', '.tiff'}, 'IgnoreCase', true)
-        fullarray=readtiff_parallel(sldFileName);
-    end
-    % Loop through timepoints and channels.
-    for T = 0:size_metadata.stackSizeT-1
-        for C = 0:size_metadata.stackSizeC-1
-            array = [];
-            count = 1;
-            if endsWith(sldFileName, {'.sld','.sldy','.czi'}, 'IgnoreCase', true)
-                for Z = 0:size_metadata.stackSizeZ-1
-                    plane = bfGetPlane(r, r.getIndex(Z, C, T) + 1);
-                    array(:, :, count) = double(plane);
-                    count = count + 1;
-                    plane_count = plane_count + 1;
-                    if plane_count == int32(size_metadata.stackSizeZ * size_metadata.stackSizeC) + 1
-                        frameInterval = omeMeta.getPlaneDeltaT(seriesIndex, plane_count).value().doubleValue()/1000;
-                        firstframeInterval = omeMeta.getPlaneDeltaT(seriesIndex, 0).value().doubleValue()/1000;
-                        frameInterval = frameInterval - firstframeInterval;
-                    end
+
+    % 1. Extract dimensions into local variables for parallel broadcasting
+    stackSizeT = size_metadata.stackSizeT;
+    stackSizeC = size_metadata.stackSizeC;
+    stackSizeZ = size_metadata.stackSizeZ;
+
+    % 2. Pre-fetch one plane to get dimensions/type for workers
+    sample_plane = bfGetPlane(r, 1);
+    [actualRows, actualCols] = size(sample_plane);
+    native_class = class(sample_plane);
+
+    fprintf('Starting parallel conversion of %d timepoints...\n', stackSizeT);
+
+    % --- BEGIN PARALLEL PROCESSING ---
+    parfor T = 0:stackSizeT-1
+        % Create a worker-specific reader for this timepoint
+        worker_r = bfGetReader(sldFileName);
+        worker_r.setSeries(seriesIndex);
+        
+        for C = 0:stackSizeC-1
+            % Memory Guard Logic
+            use_fast_mode = true;
+            local_array = []; 
+            
+            try
+                % Attempt fast preallocation (zeros)
+                local_array = zeros(actualRows, actualCols, stackSizeZ, native_class);
+            catch ME
+                if strcmp(ME.identifier, 'MATLAB:nomem') || strcmp(ME.identifier, 'MATLAB:array:SizeLimitExceeded')
+                    use_fast_mode = false; % Fallback to safe growth
+                else
+                    rethrow(ME);
                 end
-            elseif endsWith(sldFileName, {'.tif', '.tiff'}, 'IgnoreCase', true)
-                array=fullarray(:,:,(C+1):size_metadata.stackSizeC:2*size_metadata.stackSizeZ*(T+1));
             end
             
-            outputArray = uint16(array(:, :, 1:size_metadata.stackSizeZ));
+            % Data Extraction
+            for Z = 0:stackSizeZ-1
+                idx = worker_r.getIndex(Z, C, T) + 1;
+                plane = bfGetPlane(worker_r, idx);
+                
+                % Insertion
+                local_array(:, :, Z + 1) = plane;
+            end
+            
+            % Output Processing
+            outputArray = uint16(local_array(:, :, 1:stackSizeZ));
             outputArray = applyZPadding(outputArray, config);
+            
             if isfield(config,'skewDirection') && (config.skewDirection == 'Y')
-                outputArray = rot90(outputArray,1);
+                outputArray = rot90(outputArray, 1);
             end
             
+            % Filename Construction
             strS = num2str(seriesIndex);
             strT = pad(num2str(T), 4, 'left', '0');
             strC = num2str(C);
             tifFileName = fullfile(tifDir, sprintf('%s_S%s_T%s_Ch%s.tif', baseFileName, strS, strT, strC));
+            
+            % Write to disk
             parallelWriteTiff(tifFileName, outputArray);
         end
+        
+        % Close the worker reader to release the file lock
+        worker_r.close();
     end
-    
+    % --- END PARALLEL PROCESSING ---
+
     seriesResult.tifDir = tifDir;
     seriesResult.currentSeriesFolder = currentSeriesFolder;
     seriesResult.currentSeriesPath = currentSeriesPath;
@@ -496,7 +546,7 @@ function config = getDefaultConfig()
     config.xyPixelSize = 0.104;
     
     % z–axis padding settings.
-    config.z_edge_padding = 'gaussian';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
+    config.z_edge_padding = 'none';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
     config.z_padding = 20;
     config.gaussian_mean = 102.27;
     config.gaussian_std = 3.17;
@@ -508,7 +558,7 @@ function config = getDefaultConfig()
     
     % Deconvolution parameters.
     config.RLmethod = 'simplified';
-    config.DeconIter = 10;
+    config.DeconIter = 1;
     config.wienerAlpha = 0.05;
     
     % Acquisition and PSF parameters.
@@ -542,7 +592,7 @@ function config = getDefaultConfig()
     config.configFile = '';
     
     % Processing mode: Choose 'deskew-only', 'decon+deskew', or 'both'.
-    config.processingMode = 'both';
+    config.processingMode = 'decon+deskew';
     
     % Output folder names.
     config.resultDirName = 'deconvolved';       % For deconvolution+deskew branch.
