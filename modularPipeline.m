@@ -199,10 +199,8 @@ end
 % It may run out of memory in some situations
 % Maybe bad if the size of each timepoint*number of cpu-cores is bigger than RAM. 
 % In future could limit the number of workers based on the size of a timepoint and the available ram
-
 % Also fixed a problem with original code not returning the correct time
 % metadata, possibly partly due to a slidebook bug
-
 % also check if it's doing the right thing with the number format,
 % previously it was storing each plane as a double in the array, this may
 % have changed to storing it as uint16. double may be necessary for later
@@ -256,6 +254,16 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
         mkdir(tifDir);
     end
 
+    % Create a directory specifically for unpadded tifs if 'both' mode is selected
+    % when doing deskew without decon we don't want the tifs to be padded
+    % as it breaks when doing rotate+deskew, and also max intensity projections
+    % the deskew only mode never pads the tifs
+    isBothMode = strcmp(config.processingMode, 'both');
+    tifDirUnpadded = fullfile(currentSeriesPath, 'tifs_unpadded');
+    if isBothMode && ~exist(tifDirUnpadded, 'dir')
+        mkdir(tifDirUnpadded);
+    end
+
     % 1. Extract dimensions into local variables for parallel broadcasting
     stackSizeT = size_metadata.stackSizeT;
     stackSizeC = size_metadata.stackSizeC;
@@ -265,6 +273,9 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     sample_plane = bfGetPlane(r, 1);
     [actualRows, actualCols] = size(sample_plane);
     native_class = class(sample_plane);
+
+    % Evaluate padding requirement outside the loop
+    applyPaddingFlag = strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both');
 
     fprintf('Starting parallel conversion of %d timepoints...\n', stackSizeT);
 
@@ -300,12 +311,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
             end
             
             % Output Processing
-            outputArray = uint16(local_array(:, :, 1:stackSizeZ));
-            outputArray = applyZPadding(outputArray, config);
-            
-            if isfield(config,'skewDirection') && (config.skewDirection == 'Y')
-                outputArray = rot90(outputArray, 1);
-            end
+            baseOutputArray = uint16(local_array(:, :, 1:stackSizeZ));
             
             % Filename Construction
             strS = num2str(seriesIndex);
@@ -313,8 +319,36 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
             strC = num2str(C);
             tifFileName = fullfile(tifDir, sprintf('%s_S%s_T%s_Ch%s.tif', baseFileName, strS, strT, strC));
             
-            % Write to disk
-            parallelWriteTiff(tifFileName, outputArray);
+            % Check rotation once to save repetition
+            rotateY = isfield(config,'skewDirection') && (config.skewDirection == 'Y');
+
+            % Write and optionally pad the tif file depending on the processing mode 
+            if strcmp(config.processingMode, 'deskew-only')
+                if rotateY, baseOutputArray = rot90(baseOutputArray, 1); end
+                parallelWriteTiff(tifFileName, baseOutputArray);
+                
+            elseif strcmp(config.processingMode, 'decon+deskew')
+                paddedArray = applyZPadding(baseOutputArray, config);
+                if rotateY, paddedArray = rot90(paddedArray, 1); end
+                parallelWriteTiff(tifFileName, paddedArray);
+                
+            elseif isBothMode
+                % Create both versions in memory
+                paddedArray = applyZPadding(baseOutputArray, config);
+                
+                if rotateY
+                    baseOutputArray = rot90(baseOutputArray, 1);
+                    paddedArray = rot90(paddedArray, 1);
+                end
+                
+                % Write padded version to main 'tifs' folder (for decon+deskew)
+                parallelWriteTiff(tifFileName, paddedArray);
+                
+                % Write unpadded version to 'tifs_unpadded' (for deskew-only)
+                tifFileNameUnpadded = fullfile(tifDirUnpadded, sprintf('%s_S%s_T%s_Ch%s.tif', baseFileName, strS, strT, strC));
+                parallelWriteTiff(tifFileNameUnpadded, baseOutputArray);
+            end            
+
         end
         
         % Close the worker reader to release the file lock
@@ -323,12 +357,14 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     % --- END PARALLEL PROCESSING ---
 
     seriesResult.tifDir = tifDir;
+    seriesResult.tifDirUnpadded = tifDirUnpadded; 
     seriesResult.currentSeriesFolder = currentSeriesFolder;
     seriesResult.currentSeriesPath = currentSeriesPath;
     seriesResult.frameInterval = frameInterval;
     seriesResult.pixelSizeX = size_metadata.pixelSizeX;
     seriesResult.pixelSizeY = size_metadata.pixelSizeY;
-    seriesResult.deskewedZSpacing = deskewedZSpacing;
+    seriesResult.deskewedZSpacing = deskewedZSpacing;    
+    
 end
 
 function size_metadata = getSizeMetadata(r, seriesIndex)
@@ -393,24 +429,97 @@ end
 %% -----------------------------------------------------------------------
 %% Local Function: applyZPadding
 function paddedArray = applyZPadding(array, config)
-    switch config.z_edge_padding
-        case 'none'
-            paddedArray = array;
-        case 'zero'
-            paddedArray = padarray(array, [0, 0, config.z_padding], 0, 'both');
-        case 'mirror'
-            paddedArray = padarray(array, [0, 0, config.z_padding], 'symmetric', 'both');
-        case 'gaussian'
-            frontPad = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
-            backPad  = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
-            paddedArray = cat(3, frontPad, array, backPad);
-        case 'fixed'
-            frontPad = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
-            backPad  = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
-            paddedArray = cat(3, frontPad, array, backPad);
-        otherwise
-            error('Invalid z_edge_padding option: %s', config.z_edge_padding);
-    end
+switch config.z_edge_padding
+    case 'none'
+        paddedArray = array;
+    case 'zero'
+        paddedArray = padarray(array, [0, 0, config.z_padding], 0, 'both');
+    case 'mirror'
+        % Mirrors the skewed data, skews the padded areas for realism, 
+        % --- SETUP ---
+        [ny, nx, nz] = size(array);
+        zPad = config.z_padding;
+        
+        % --- SLOPE CALCULATION ---
+        % z_step (0.5) / x_pixel (0.104) * tan(32.8)
+        % Theoretical slope is ~-3.0978 pixels. Using -3.55 as a working estimate.
+        % In future replace with calculated version depending on z-step xpixel and angle, also allow zeiss/czi
+        baseSlope = -3.55;         
+        
+        % --- INITIALIZE PADDED ARRAY ---
+        totalZ = nz + (2 * zPad);
+        paddedArray = zeros(ny, nx, totalZ, 'like', array);
+        
+        % 1. PLACE ORIGINAL DATA IN THE CENTER
+        paddedArray(:, :, zPad+1 : zPad+nz) = array;
+        
+        % 2. BOTTOM PADDING (Slices 1 to zPad)
+        for i = 1:zPad
+            targetZ = i;
+            sourceZ_in_orig = zPad - i + 1;
+            zDistance = targetZ - (zPad + sourceZ_in_orig);
+            shiftX = zDistance * baseSlope;
+            
+            % Apply geometric transformation
+            translated_slice = imtranslate(array(:,:,sourceZ_in_orig), [shiftX, 0], 'Method', 'cubic', 'FillValues', 0);
+            
+            % The previous transformation creates empty regions filled with zeros, now we will fill these with a gaussian noise to better simulate camera noise.
+            % Calculate affected columns + 1 extra column
+            colsToReplace = ceil(abs(shiftX)) + 1;
+            
+            if colsToReplace > 0
+                % Generate Gaussian noise
+                noise_cols = cast(config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), 'like', array);
+                
+                if shiftX > 0
+                    % Image shifted right -> empty space is on the left
+                    translated_slice(:, 1:colsToReplace) = noise_cols;
+                else
+                    % Image shifted left -> empty space is on the right
+                    translated_slice(:, (nx - colsToReplace + 1):nx) = noise_cols;
+                end
+            end
+            
+            paddedArray(:,:,targetZ) = translated_slice;
+        end        
+        % 3. TOP PADDING (Slices zPad+nz+1 to totalZ)
+        for i = 1:zPad
+            targetZ = zPad + nz + i;
+            sourceZ_in_orig = nz - i + 1;
+            zDistance = targetZ - (zPad + sourceZ_in_orig);
+            shiftX = zDistance * baseSlope;
+            
+            % Apply geometric transformation
+            translated_slice = imtranslate(array(:,:,sourceZ_in_orig), [shiftX, 0], 'Method', 'cubic', 'FillValues', 0);
+            
+            % The previous transformation creates empty regions filled with zeros, now we will fill these with a gaussian noise to better simulate camera noise.
+            % Calculate affected columns + 1 extra column
+            colsToReplace = ceil(abs(shiftX)) + 1;            
+            if colsToReplace > 0
+                % Generate Gaussian noise
+                noise_cols = cast(config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), 'like', array);                
+                if shiftX > 0
+                    % Image shifted right -> empty space is on the left
+                    translated_slice(:, 1:colsToReplace) = noise_cols;
+                else
+                    % Image shifted left -> empty space is on the right
+                    translated_slice(:, (nx - colsToReplace + 1):nx) = noise_cols;
+                end
+            end            
+            paddedArray(:,:,targetZ) = translated_slice;
+        end       
+    case 'gaussian'
+        frontPad = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
+        backPad  = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
+        paddedArray = cat(3, frontPad, array, backPad);
+    case 'fixed'
+        frontPad = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
+        backPad  = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
+        paddedArray = cat(3, frontPad, array, backPad);
+    otherwise
+        error('Invalid z_edge_padding option: %s', config.z_edge_padding);
+end
+
 end
 
 %% -----------------------------------------------------------------------
@@ -433,6 +542,10 @@ function runDeconDeskewPipeline(seriesResult, config)
          reset(gpuDevice);
     end
     
+    % % Remove z-padding from the decon results, before we deskew.
+    deconDir = fullfile(seriesResult.tifDir, config.resultDirName);
+    removePaddingFromDir(deconDir, config);
+
     % Deskew step.
     dataPath_exps = fullfile(seriesResult.tifDir, config.resultDirName);
     XR_deskew_rotate_data_wrapper(dataPath_exps, 'skewAngle', config.skewAngle, 'flipZstack', config.flipZstack, ...
@@ -441,12 +554,9 @@ function runDeconDeskewPipeline(seriesResult, config)
         'zarrFile', config.zarrFile, 'saveZarr', config.saveZarr, 'Save16bit', config.Save16bit, 'parseCluster', config.parseCluster, ...
         'masterCompute', config.masterCompute, 'configFile', config.configFile, 'mccMode', config.mccMode);
     
-    % Remove z-padding from the decon+deskew results.
-    deconDSDir = fullfile(dataPath_exps, 'DS');
-    removePaddingFromDir(deconDSDir, config);
-    
     % Merge the deconvolved+deskewed images.
     outputTiffFile = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_decondeskew.tif']);
+    deconDSDir = fullfile(dataPath_exps, 'DS');
     if isfield(config,'skewDirection')
         paraMergeTiffFilesToMultiDimStack(deconDSDir, outputTiffFile, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval, config.skewDirection);
     else
@@ -467,19 +577,22 @@ end
 function runDeskewOnlyPipeline(seriesResult, config)
     fprintf('Running deskew-only pipeline for series: %s\n', seriesResult.currentSeriesFolder);
     
+    % Use the unpadded directory if we used the 'both' deskew and deskew+decon mode, otherwise use the standard directory
+    if strcmp(config.processingMode, 'both')
+        inputDir = seriesResult.tifDirUnpadded;
+    else
+        inputDir = seriesResult.tifDir;
+    end
+
     XR_deskew_rotate_data_wrapper(seriesResult.tifDir, 'resultDirName', config.resultDirNameDeskew, 'skewAngle', config.skewAngle, 'flipZstack', config.flipZstack, ...
         'DSRCombined', config.DSRCombined, 'rotate', config.rotate, 'xyPixelSize', config.xyPixelSize, 'dz', config.dz, ...
         'Reverse', config.Reverse, 'ChannelPatterns', config.ChannelPatterns, 'largeFile', config.largeFile, ...
         'zarrFile', config.zarrFile, 'saveZarr', config.saveZarr, 'Save16bit', config.Save16bit, 'parseCluster', config.parseCluster, ...
         'masterCompute', config.masterCompute, 'configFile', config.configFile, 'mccMode', config.mccMode);
     
-    % Remove padding from the deskew-only output.
-    deskewDSDir = fullfile(seriesResult.tifDir, config.resultDirNameDeskew);
-    deskewDSDir
-    removePaddingFromDir(deskewDSDir, config);
-    
     % Merge the deskew-only images.
     outputTiffFileDeskew = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_deskew.tif']);
+    deskewDSDir = fullfile(seriesResult.tifDir, config.resultDirNameDeskew);
     if isfield(config,'skewDirection')
         paraMergeTiffFilesToMultiDimStack(deskewDSDir, outputTiffFileDeskew, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval, config.skewDirection);
     else
@@ -546,8 +659,8 @@ function config = getDefaultConfig()
     config.xyPixelSize = 0.104;
     
     % z–axis padding settings.
-    config.z_edge_padding = 'none';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
-    config.z_padding = 20;
+    config.z_edge_padding = 'mirror';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
+    config.z_padding = 20;  % this needs to come with a warning about not padding more than half the size of the stack
     config.gaussian_mean = 102.27;
     config.gaussian_std = 3.17;
     config.fixed_value = 100;
