@@ -112,43 +112,43 @@ function modularPipeline(psfFolder, inputFolder)
             end
          end
 
-        if ~isempty(tifFiles)
-            % Only process matching TIF files
-            filePaths = fullfile({tifFiles.folder}, {tifFiles.name});
-            disp('Processing series of 3D TIF files...');
-            %assume all tifs have same metadata
-            seriesResult = processTifFolder(config);
+         if ~isempty(tifFiles)
+             % Only process matching TIF files
+             filePaths = fullfile({tifFiles.folder}, {tifFiles.name});
+             disp('Processing series of 3D TIF files...');
+             %assume all tifs have same metadata
+             seriesResult = processTifFolder(config);
 
-            if isempty(seriesResult)
+             if isempty(seriesResult)
                  error('No valid TIFF series found in %s', config.inputFolder);
-            end
+             end
 
-                if strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both')
-                    r=bfGetReader(filePaths{1});
-                    tif3D_metadata = getSizeMetadata(r,0);
-                    r.close();
-                    if (abs(tif3D_metadata.pixelSizeZ - psf_metadata.pixelSizeZ)<1e-3)
-                        runDeconDeskewPipeline(seriesResult, config);
-                    else
-                        warning('Skipping series %d Z spacing does not match PSF.', 0);
-                    end
-                end
-                if strcmp(config.processingMode, 'deskew-only') || strcmp(config.processingMode, 'both')
-                    runDeskewOnlyPipeline(seriesResult, config);
-                end
-                deleteIntermediateFiles(seriesResult.tifDir, config);
-        else
-            % No matching files, do something else
-            % ignore files with ending
-            ignoreSuffixes = {'_decon.tif', '_deskew.tif', '_MAX.tif','_decondeskew.tif'};
-            disp('Processing Tif files...');
-            for i = 1:length(allTifFiles)
-                if ~endsWith(allTifFiles(i).name,ignoreSuffixes,"IgnoreCase",true)
-                    filepath = fullfile(allTifFiles(i).folder,allTifFiles(i).name);
-                    processSldFile(filepath, config, psf_metadata);
-                end
-            end
-        end
+             if strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both')
+                 r=bfGetReader(filePaths{1});
+                 tif3D_metadata = getSizeMetadata(r,0);
+                 r.close();
+                 if (abs(tif3D_metadata.pixelSizeZ - psf_metadata.pixelSizeZ)<1e-3)
+                     runDeconDeskewPipeline(seriesResult, config);
+                 else
+                     warning('Skipping series %d Z spacing does not match PSF.', 0);
+                 end
+             end
+             if strcmp(config.processingMode, 'deskew-only') || strcmp(config.processingMode, 'both')
+                 runDeskewOnlyPipeline(seriesResult, config);
+             end
+             deleteIntermediateFiles(seriesResult.tifDir, config);
+         else
+             % No matching files, do something else
+             % ignore files with ending
+             ignoreSuffixes = {'_decon.tif', '_deskew.tif', '_MAX.tif','_decondeskew.tif'};
+             disp('Processing Tif files...');
+             for i = 1:length(allTifFiles)
+                 if ~endsWith(allTifFiles(i).name,ignoreSuffixes,"IgnoreCase",true)
+                     filepath = fullfile(allTifFiles(i).folder,allTifFiles(i).name);
+                     processSldFile(filepath, config, psf_metadata);
+                 end
+             end
+         end
     else
          error('No .sld or .tif files found in folder %s', config.inputFolder);
     end
@@ -628,19 +628,54 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: deleteIntermediateFiles
+% Deletes the redundant intermediate files that are not needed anymore
 function deleteIntermediateFiles(tifDir, config)
+    % 1. Delete Raw tifs (i.e. not deconvolved or deskewed)
     if config.deleteRawTif
-         rawFiles = dir(fullfile(tifDir, '*.tif'));
-         for k = 1:length(rawFiles)
-             delete(fullfile(rawFiles(k).folder, rawFiles(k).name));
-         end
+         deleteFilesInDir(tifDir);
     end
+    
+    % 2. Delete Processed Intermediate tifs (i.e. deconvolved and/or deskewed)
     if config.deleteDeconTif
-         deconTifDir = fullfile(tifDir, config.resultDirName);
-         deconFiles = dir(fullfile(deconTifDir, '*.tif'));
-         for k = 1:length(deconFiles)
-             delete(fullfile(deconFiles(k).folder, deconFiles(k).name));
-         end
+         % Define base directories based on config
+         deconDir = fullfile(tifDir, config.resultDirName);
+         deconDSDir = fullfile(deconDir, 'DS');
+         deskewDir = fullfile(tifDir, config.resultDirNameDeskew);
+         
+         % 1) Delete deconvolved tifs
+         % (e.g., input\...\tifs)
+         deleteFilesInDir(deconDir);
+         
+         % 2) Delete deconvolved MIPs 
+         % (e.g., input\...\tifs\deconvolved\MIPs)
+         deleteFilesInDir(fullfile(deconDir, 'MIPs'));
+         
+         % 3) Delete deconvolved and then deskewed tifs 
+         % (e.g., input\...\tifs\deconvolved\DS)
+         deleteFilesInDir(deconDSDir);
+         
+         % 4) Delete deconvolved and then deskewed MIPs 
+         % (e.g., input\...\tifs\deconvolved\DS\MIPs)
+         deleteFilesInDir(fullfile(deconDSDir, 'MIPs'));
+         
+         % 5) Delete deskew-only tifs 
+         % (e.g., input\...\tifs\DS)
+         deleteFilesInDir(deskewDir);
+         
+         % 6) Delete deskew-only MIPs 
+         % (e.g., input\...\tifs\DS\MIPs)
+         deleteFilesInDir(fullfile(deskewDir, 'MIPs'));
+    end
+end
+
+%% Helper Function: deleteFilesInDir
+% Checks if the directory exists and deletes all .tif files inside
+function deleteFilesInDir(targetDir)
+    if exist(targetDir, 'dir')
+        files = dir(fullfile(targetDir, '*.tif'));
+        for k = 1:length(files)
+            delete(fullfile(files(k).folder, files(k).name));
+        end
     end
 end
 
@@ -659,8 +694,8 @@ function config = getDefaultConfig()
     config.xyPixelSize = 0.104;
     
     % z–axis padding settings.
-    config.z_edge_padding = 'mirror';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
-    config.z_padding = 20;  % this needs to come with a warning about not padding more than half the size of the stack
+    config.z_edge_padding = 'none';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
+    config.z_padding = 30;  % this needs to come with a warning about not padding more than half the size of the stack
     config.gaussian_mean = 102.27;
     config.gaussian_std = 3.17;
     config.fixed_value = 100;
@@ -671,7 +706,7 @@ function config = getDefaultConfig()
     
     % Deconvolution parameters.
     config.RLmethod = 'simplified';
-    config.DeconIter = 1;
+    config.DeconIter = 10;
     config.wienerAlpha = 0.05;
     
     % Acquisition and PSF parameters.
