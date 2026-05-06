@@ -1,33 +1,25 @@
 function modularPipeline(psfFolder, inputFolder)
-% modularPipeline prompts the user for:
-%    1. A folder containing PSF files. Assumes PSF filenames contain the text
-%       'PSF_CHX' (where X is a number) and uses those to build the PSF paths.
-%    2. A folder containing the files to deconvolve (either .sld or .tif).
-%
-% The code then processes the data using one or both pipelines (decon+deskew and/or
-% deskew-only), with z–axis padding applied during conversion and removed before merging.
+% modularPipeline processes microscope data using decon+deskew and/or deskew-only.
 
-    %% --- UI: Ask the User for Required Folders ---
-    % Allow test code to pass paths directly
-    if nargin < 1 || isempty(psfFolder)
-        psfFolder = uigetdir([], 'Select the folder containing your PSF files');
-        if psfFolder == 0
-            error('No PSF folder selected.');
+    %% --- UI: Ask the User for Required Folders and Config ---
+    % If paths are not provided via arguments, launch the GUI
+    if nargin < 2 || isempty(psfFolder) || isempty(inputFolder)
+        [uiResult, isCanceled] = launchPipelineGUI();
+        
+        if isCanceled
+            disp('Processing canceled by user.');
+            return;
         end
-    end
-
-    if nargin < 2 || isempty(inputFolder)
-        inputFolder = uigetdir([], 'Select the folder containing files to deconvolve (SLD or TIFF)');
-        if inputFolder == 0
-            error('No input folder selected.');
-        end
+        
+        psfFolder = uiResult.psfFolder;
+        config = uiResult.config;
+    else
+        % If run programmatically, just use defaults and the provided paths
+        config = getDefaultConfig();
+        config.inputFolder = inputFolder;
     end
     
-    %% --- Get Default Configuration and Update with User Choices ---
-    config = getDefaultConfig();
-    config.inputFolder = inputFolder;
-    
-    % Build the PSF file list by scanning the PSF folder.
+    %% --- Build the PSF file list ---
     psfFiles = dir(fullfile(psfFolder, '*PSF_CH*.tif'));
     if isempty(psfFiles)
         error('No PSF files found in %s', psfFolder);
@@ -61,10 +53,12 @@ function modularPipeline(psfFolder, inputFolder)
         % Create a channel pattern (e.g. 'Ch1', 'Ch2', ...).
         config.ChannelPatterns{i} = ['Ch' num2str(psfArray(i).channel)];
     end
+    
     % get size Metadata - assuming same for all PSF channels
     r=bfGetReader(psfArray(1).fullpath);
     psf_metadata = getSizeMetadata(r,0);
     r.close();
+    
     fprintf('Selected PSF files:\n');
     disp(config.PSFFullpaths);
     fprintf('Channel Patterns:\n');
@@ -556,7 +550,14 @@ function runDeconDeskewPipeline(seriesResult, config)
     
     % Merge the deconvolved+deskewed images.
     outputTiffFile = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_decondeskew.tif']);
-    deconDSDir = fullfile(dataPath_exps, 'DS');
+    
+    % If rotation is enabled then merge the 'DSR' folder, otherwise 'DS'    
+    if config.rotate
+        deconDSDir = fullfile(dataPath_exps, 'DSR');
+    else
+        deconDSDir = fullfile(dataPath_exps, 'DS');
+    end
+    
     if isfield(config,'skewDirection')
         paraMergeTiffFilesToMultiDimStack(deconDSDir, outputTiffFile, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval, config.skewDirection);
     else
@@ -592,7 +593,14 @@ function runDeskewOnlyPipeline(seriesResult, config)
     
     % Merge the deskew-only images.
     outputTiffFileDeskew = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_deskew.tif']);
-    deskewDSDir = fullfile(seriesResult.tifDir, config.resultDirNameDeskew);
+    
+    % If rotation is enabled then merge the 'DSR' folder, otherwise 'DS'
+    if config.rotate
+        deskewDSDir = fullfile(seriesResult.tifDir, [config.resultDirNameDeskew, 'R']); % e.g., 'DSR'
+    else
+        deskewDSDir = fullfile(seriesResult.tifDir, config.resultDirNameDeskew); % e.g., 'DS'
+    end
+    
     if isfield(config,'skewDirection')
         paraMergeTiffFilesToMultiDimStack(deskewDSDir, outputTiffFileDeskew, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval, config.skewDirection);
     else
@@ -628,48 +636,41 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: deleteIntermediateFiles
-% Deletes the redundant intermediate files that are not needed anymore
 function deleteIntermediateFiles(tifDir, config)
-    % 1. Delete Raw tifs (i.e. not deconvolved or deskewed)
     if config.deleteRawTif
          deleteFilesInDir(tifDir);
+         % Also clean up unpadded tifs if 'both' mode was used
+         deleteFilesInDir(fullfile(tifDir, '..', 'tifs_unpadded')); 
     end
     
-    % 2. Delete Processed Intermediate tifs (i.e. deconvolved and/or deskewed)
     if config.deleteDeconTif
-         % Define base directories based on config
+         % Base Deconvolution Directory
          deconDir = fullfile(tifDir, config.resultDirName);
-         deconDSDir = fullfile(deconDir, 'DS');
-         deskewDir = fullfile(tifDir, config.resultDirNameDeskew);
          
-         % 1) Delete deconvolved tifs
-         % (e.g., input\...\tifs)
-         deleteFilesInDir(deconDir);
+         % Define all possible intermediate folders to ensure a clean sweep.
+         % This catches both standard (DS) and rotated (DSR) outputs.
+         foldersToClean = {
+             deconDir, ...
+             fullfile(deconDir, 'MIPs'), ...
+             fullfile(deconDir, 'DS'), ...
+             fullfile(deconDir, 'DS', 'MIPs'), ...
+             fullfile(deconDir, 'DSR'), ...
+             fullfile(deconDir, 'DSR', 'MIPs'), ...
+             fullfile(tifDir, config.resultDirNameDeskew), ...
+             fullfile(tifDir, config.resultDirNameDeskew, 'MIPs'), ...
+             fullfile(tifDir, [config.resultDirNameDeskew, 'R']), ... % e.g., 'DSR'
+             fullfile(tifDir, [config.resultDirNameDeskew, 'R'], 'MIPs')
+         };
          
-         % 2) Delete deconvolved MIPs 
-         % (e.g., input\...\tifs\deconvolved\MIPs)
-         deleteFilesInDir(fullfile(deconDir, 'MIPs'));
-         
-         % 3) Delete deconvolved and then deskewed tifs 
-         % (e.g., input\...\tifs\deconvolved\DS)
-         deleteFilesInDir(deconDSDir);
-         
-         % 4) Delete deconvolved and then deskewed MIPs 
-         % (e.g., input\...\tifs\deconvolved\DS\MIPs)
-         deleteFilesInDir(fullfile(deconDSDir, 'MIPs'));
-         
-         % 5) Delete deskew-only tifs 
-         % (e.g., input\...\tifs\DS)
-         deleteFilesInDir(deskewDir);
-         
-         % 6) Delete deskew-only MIPs 
-         % (e.g., input\...\tifs\DS\MIPs)
-         deleteFilesInDir(fullfile(deskewDir, 'MIPs'));
+         % Loop through and delete .tif files safely
+         for i = 1:length(foldersToClean)
+             deleteFilesInDir(foldersToClean{i});
+         end
     end
 end
 
 %% Helper Function: deleteFilesInDir
-% Checks if the directory exists and deletes all .tif files inside
+% Checks if the directory exists and deletes all .tif files inside to prevent repetitive code.
 function deleteFilesInDir(targetDir)
     if exist(targetDir, 'dir')
         files = dir(fullfile(targetDir, '*.tif'));
@@ -706,7 +707,7 @@ function config = getDefaultConfig()
     
     % Deconvolution parameters.
     config.RLmethod = 'simplified';
-    config.DeconIter = 10;
+    config.DeconIter = 1;
     config.wienerAlpha = 0.05;
     
     % Acquisition and PSF parameters.
@@ -751,4 +752,142 @@ function config = getCziDefaultConfig(config)
     config.xyPixelSize = 0.1449922;
     config.skewAngle = 30.0;
     config.skewDirection = 'Y';
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: launchPipelineGUI
+function [uiResult, canceled] = launchPipelineGUI()
+    % Setup defaults and initialize outputs
+    canceled = true;
+    uiResult = struct();
+    
+    % Load saved folder paths if they exist
+    if ispref('ModPipeline', 'lastPSF')
+        defaultPSF = getpref('ModPipeline', 'lastPSF');
+    else
+        defaultPSF = pwd;
+    end
+    
+    if ispref('ModPipeline', 'lastInput')
+        defaultInput = getpref('ModPipeline', 'lastInput');
+    else
+        defaultInput = pwd;
+    end
+
+    % Increased height to 680 to properly fit everything
+    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 480, 680]);
+    
+    % --- 1. Folders ---
+    yPos = 630; % Shifted starting position up
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
+    
+    yPos = yPos - 30;
+    btnPSF = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select PSF Folder');
+    lblPSF = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultPSF, 'Interpreter', 'none');
+    btnPSF.ButtonPushedFcn = @(btn,event) folderSelect(lblPSF, 'Select PSF Folder');
+    
+    yPos = yPos - 30;
+    btnInput = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select Input Folder');
+    lblInput = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultInput, 'Interpreter', 'none');
+    btnInput.ButtonPushedFcn = @(btn,event) folderSelect(lblInput, 'Select Input Folder');
+
+    % --- 2. Parameters ---
+    yPos = yPos - 40;
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '2. Microscope & PSF Settings', 'FontWeight', 'bold');
+    
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image z-step size (microns):');
+    editDz = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.5);
+    
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image XY pixel size (microns):');
+    editXY = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.104);
+    
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'PSF z-step size (microns):');
+    editDzPSF = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.5);
+
+    % --- 3. Processing Mode ---
+    yPos = yPos - 40;
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '3. Processing Mode', 'FontWeight', 'bold');
+    yPos = yPos - 25;
+    chkDeskew = uicheckbox(fig, 'Position', [30, yPos, 150, 22], 'Text', 'Deskew', 'Value', 0);
+    yPos = yPos - 25;
+    chkDecon = uicheckbox(fig, 'Position', [30, yPos, 200, 22], 'Text', 'Deconvolve and then deskew', 'Value', 1);
+
+    % --- 4. Deconvolution Settings ---
+    yPos = yPos - 40;
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '4. Deconvolution Settings', 'FontWeight', 'bold');
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Number of Deconvolution Iterations:');
+    editIter = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 1);
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Background value to subtract:');
+    editBG = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 100);
+
+    % --- 5. Rotation ---
+    yPos = yPos - 40;
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '5. Rotation / Coverslip Correction', 'FontWeight', 'bold');
+    yPos = yPos - 50;
+    bgRotate = uibuttongroup(fig, 'Position', [20, yPos, 300, 50], 'BorderType', 'none');
+    uiradiobutton(bgRotate, 'Position', [10, 25, 250, 22], 'Text', 'Deskew');
+    rbRotate = uiradiobutton(bgRotate, 'Position', [10, 5, 280, 22], 'Text', 'Deskew and coverslip correct (rotate)');
+
+    % --- 6. File Management ---
+    yPos = yPos - 40;
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '6. File Management', 'FontWeight', 'bold');
+    yPos = yPos - 25;
+    chkDelRaw = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete raw conversion TIFs', 'Value', 0);
+    yPos = yPos - 25;
+    chkDelInter = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete intermediate processed TIFs', 'Value', 0);
+
+    % --- Run Button ---
+    % Button is safely at the bottom (y=20) while the last checkbox is now at y=70.
+    btnRun = uibutton(fig, 'Position', [190, 20, 100, 35], 'Text', 'Run Pipeline', ...
+        'ButtonPushedFcn', @runPipeline);
+
+    drawnow;    
+    uiwait(fig);
+
+    % --- Callbacks ---
+    function folderSelect(lblTarget, promptTitle)
+        startPath = lblTarget.Text;
+        if ~isfolder(startPath), startPath = pwd; end
+        selectedFolder = uigetdir(startPath, promptTitle);
+        if selectedFolder ~= 0, lblTarget.Text = selectedFolder; end
+    end
+
+    function runPipeline(~, ~)
+        setpref('ModPipeline', 'lastPSF', lblPSF.Text);
+        setpref('ModPipeline', 'lastInput', lblInput.Text);
+
+        baseConfig = getDefaultConfig(); 
+        baseConfig.inputFolder = lblInput.Text;
+        uiResult.psfFolder     = lblPSF.Text;
+        
+        % Mapping values
+        baseConfig.dz          = editDz.Value;
+        baseConfig.xyPixelSize = editXY.Value;
+        baseConfig.dzPSF       = editDzPSF.Value;
+        baseConfig.DeconIter   = editIter.Value;
+        baseConfig.Background  = editBG.Value;
+        
+        % Mapping Cleanup Flags
+        baseConfig.deleteRawTif   = chkDelRaw.Value;
+        baseConfig.deleteDeconTif = chkDelInter.Value;
+        
+        if chkDeskew.Value && chkDecon.Value
+            baseConfig.processingMode = 'both';
+        elseif chkDecon.Value
+            baseConfig.processingMode = 'decon+deskew';
+        else
+            baseConfig.processingMode = 'deskew-only';
+        end
+        
+        baseConfig.rotate = (bgRotate.SelectedObject == rbRotate);
+
+        uiResult.config = baseConfig;
+        canceled = false;
+        delete(fig);
+    end
 end
