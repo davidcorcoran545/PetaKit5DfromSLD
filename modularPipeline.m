@@ -290,7 +290,9 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
         end       
         
         % Create a worker-specific reader for this timepoint
-        worker_r = bfGetReader(sldFileName);        
+        worker_r = bfGetReader(sldFileName);
+        % Closes the reader even if there's an error
+        cleanupObj = onCleanup(@() worker_r.close());
         worker_r.setSeries(seriesIndex);
         
         for C = 0:stackSizeC-1
@@ -359,8 +361,6 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
 
         end
         
-        % Close the worker reader to release the file lock
-        worker_r.close();
     end
     % --- END PARALLEL PROCESSING ---
 
