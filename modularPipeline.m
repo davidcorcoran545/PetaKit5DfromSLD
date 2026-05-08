@@ -297,15 +297,17 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
         
         for C = 0:stackSizeC-1
             % Memory Guard Logic
-            use_fast_mode = true;
-            local_array = []; 
-            
-            try
-                % Attempt fast preallocation (zeros)
+            % May need improving in future, doesn't do much here
+            local_array = [];             
+            try                
+                % Try to preallocate full 3D stack (zeros)
+                % This is fast and should succeed for almost all LLSM data sizes and computer memory availability 
+                % If this fails catch will also probably fail later on
                 local_array = zeros(actualRows, actualCols, stackSizeZ, native_class);
             catch ME
                 if strcmp(ME.identifier, 'MATLAB:nomem') || strcmp(ME.identifier, 'MATLAB:array:SizeLimitExceeded')
-                    use_fast_mode = false; % Fallback to safe growth
+                   warning('Could not preallocate full 3D stack. Continuing with dynamic array growth; this may still fail if memory is insufficient.');
+                   local_array = [];     
                 else
                     rethrow(ME);
                 end
