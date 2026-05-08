@@ -383,12 +383,12 @@ function size_metadata = getSizeMetadata(r, seriesIndex, config, sourceName)
 
     omeMeta = r.getMetadataStore();
 
-    % Dimensions
-    size_metadata.stackSizeX = omeMeta.getPixelsSizeX(seriesIndex).getValue();
-    size_metadata.stackSizeY = omeMeta.getPixelsSizeY(seriesIndex).getValue();
-    size_metadata.stackSizeZ = omeMeta.getPixelsSizeZ(seriesIndex).getValue();
-    size_metadata.stackSizeC = omeMeta.getPixelsSizeC(seriesIndex).getValue();
-    size_metadata.stackSizeT = omeMeta.getPixelsSizeT(seriesIndex).getValue();
+    % Dimensions (Cast to double to prevent Java object math errors downstream)
+    size_metadata.stackSizeX = double(omeMeta.getPixelsSizeX(seriesIndex).getValue());
+    size_metadata.stackSizeY = double(omeMeta.getPixelsSizeY(seriesIndex).getValue());
+    size_metadata.stackSizeZ = double(omeMeta.getPixelsSizeZ(seriesIndex).getValue());
+    size_metadata.stackSizeC = double(omeMeta.getPixelsSizeC(seriesIndex).getValue());
+    size_metadata.stackSizeT = double(omeMeta.getPixelsSizeT(seriesIndex).getValue());
 
     % Physical sizes with fallback
     size_metadata.pixelSizeX = readPhysicalSize( ...
