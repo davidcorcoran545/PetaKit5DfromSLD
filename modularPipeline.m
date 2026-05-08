@@ -1,8 +1,7 @@
-
 function modularPipeline(psfFolder, inputFolder)
 % modularPipeline processes microscope data using decon+deskew and/or deskew-only.
-
-    %% --- UI: Ask the User for Required Folders and Config ---
+    
+    % --- UI: Ask the User for Required Folders and Config ---
     % If paths are not provided via arguments, launch the GUI
     if nargin < 2 || isempty(psfFolder) || isempty(inputFolder)
         [uiResult, isCanceled] = launchPipelineGUI();
@@ -19,7 +18,14 @@ function modularPipeline(psfFolder, inputFolder)
         config = getDefaultConfig();
         config.inputFolder = inputFolder;
     end
-    
+
+    %% --- Suppress Bio-Formats debug/info logging ---
+    try
+        loci.common.DebugTools.setRootLevel('WARN');
+    catch
+        % If Bio-Formats is not available yet, do nothing
+    end
+
     %% --- Build the PSF file list ---
     psfFiles = dir(fullfile(psfFolder, '*PSF_CH*.tif'));
     if isempty(psfFiles)
@@ -276,8 +282,15 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
 
     % --- BEGIN PARALLEL PROCESSING ---
     parfor T = 0:stackSizeT-1
+        % Suppress Bio-Formats debug/info logging
+        try
+            loci.common.DebugTools.setRootLevel('WARN');
+        catch
+            % If Bio-Formats is not available yet, do nothing
+        end       
+        
         % Create a worker-specific reader for this timepoint
-        worker_r = bfGetReader(sldFileName);
+        worker_r = bfGetReader(sldFileName);        
         worker_r.setSeries(seriesIndex);
         
         for C = 0:stackSizeC-1
