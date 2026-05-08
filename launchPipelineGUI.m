@@ -12,52 +12,62 @@ function [uiResult, canceled] = launchPipelineGUI()
     cfg          = uiState.config;
 
     % Increase the below if you add more features to give more room
-    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 480, 700]);
-    
+    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 660]);
+
     % --- 1. Folders ---
-    yPos = 650; 
+    yPos = 630; 
     uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
-    
-    yPos = yPos - 30;
-    btnPSF = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select PSF Folder');
-    lblPSF = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultPSF, 'Interpreter', 'none');
-    btnPSF.ButtonPushedFcn = @(btn,event) folderSelect(lblPSF, 'Select PSF Folder');
     
     yPos = yPos - 30;
     btnInput = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select Input Folder');
     lblInput = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultInput, 'Interpreter', 'none');
     btnInput.ButtonPushedFcn = @(btn,event) folderSelect(lblInput, 'Select Input Folder');
 
+    yPos = yPos - 30;
+    btnPSF = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select PSF Folder');
+    lblPSF = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultPSF, 'Interpreter', 'none');
+    btnPSF.ButtonPushedFcn = @(btn,event) folderSelect(lblPSF, 'Select PSF Folder');
+
     % --- 2. Parameters ---
     yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '2. Microscope & PSF Settings', 'FontWeight', 'bold');
-    
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image z-step size (microns):');
-    editDz = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', cfg.dz);
-    
+    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '2. Metadata', 'FontWeight', 'bold');
+
     yPos = yPos - 30;
     uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image XY pixel size (microns):');
     editXY = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', cfg.xyPixelSize);
+
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image Z-step size (microns):');
+    editDz = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', cfg.dz);
     
     yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'PSF z-step size (microns):');
+    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'PSF Z-step size (microns):');
     editDzPSF = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', cfg.dzPSF);
 
     % --- 3. Processing Mode ---
     yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '3. Processing Mode', 'FontWeight', 'bold');
+    uilabel(fig, 'Position', [20, yPos, 400, 22], ...
+        'Text', '3. Processing Mode', 'FontWeight', 'bold');
+
     yPos = yPos - 25;
-    chkDeskew = uicheckbox(fig, 'Position', [30, yPos, 150, 22], 'Text', 'Deskew', ...
+    chkDeskew = uicheckbox(fig, 'Position', [30, yPos, 150, 22], ...
+        'Text', 'Deskew', ...
         'Value', strcmp(cfg.processingMode, 'deskew-only') || strcmp(cfg.processingMode, 'both'));
+
     yPos = yPos - 25;
-    chkDecon = uicheckbox(fig, 'Position', [30, yPos, 200, 22], 'Text', 'Deconvolve and then deskew', ...
+    chkDecon = uicheckbox(fig, 'Position', [30, yPos, 220, 22], ...
+        'Text', 'Deconvolve and then deskew', ...
         'Value', strcmp(cfg.processingMode, 'decon+deskew') || strcmp(cfg.processingMode, 'both'));
+
+    yPos = yPos - 25;
+    chkRotate = uicheckbox(fig, 'Position', [30, yPos, 250, 22], ...
+        'Text', 'Coverslip correction (rotation)', ...
+        'Value', cfg.rotate);
 
     % --- 4. Deconvolution Settings ---
     yPos = yPos - 40;
     uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '4. Deconvolution Settings', 'FontWeight', 'bold');
-    
+
     yPos = yPos - 30;
     uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Deconvolution method:');
     ddAlgorithm = uidropdown(fig, 'Position', [250, yPos, 100, 22], ...
@@ -70,27 +80,33 @@ function [uiResult, canceled] = launchPipelineGUI()
     yPos = yPos - 30;
     uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Background value to subtract:');
     editBG = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', cfg.Background);
+   
+    yPos = yPos - 30;
+    chkZPad = uicheckbox(fig, 'Position', [30, yPos, 220, 22], ...
+        'Text', 'Pad image in the z-axis', ...
+        'Value', ~strcmpi(cfg.z_edge_padding, 'none'));
 
-    % --- 5. Rotation ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '5. Rotation / Coverslip Correction', 'FontWeight', 'bold');
-    yPos = yPos - 50;
-    bgRotate = uibuttongroup(fig, 'Position', [20, yPos, 300, 50], 'BorderType', 'none');
-    rbDeskewOnly = uiradiobutton(bgRotate, 'Position', [10, 25, 250, 22], 'Text', 'Deskew');
-    rbRotate = uiradiobutton(bgRotate, 'Position', [10, 5, 280, 22], 'Text', 'Deskew and coverslip correct (rotate)');
-    if cfg.rotate
-        bgRotate.SelectedObject = rbRotate;
-    else
-        bgRotate.SelectedObject = rbDeskewOnly;
-    end
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 220, 22], ...
+        'Text', 'Number of slices to pad:');
 
-    % --- 6. File Management ---
+    editZPad = uieditfield(fig, 'numeric', ...
+        'Position', [250, yPos, 80, 22], ...
+        'Value', cfg.z_padding, ...
+        'Limits', [0 Inf], ...
+        'RoundFractionalValues', true);
+    editZPad.Enable = matlab.lang.OnOffSwitchState(chkZPad.Value);
+    chkZPad.ValueChangedFcn = @(src,event) set(editZPad, 'Enable', matlab.lang.OnOffSwitchState(src.Value))
+
+    % --- 5. File Management ---
     yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '6. File Management', 'FontWeight', 'bold');
+    uilabel(fig, 'Position', [20, yPos, 400, 22], ...
+        'Text', '5. File Management', 'FontWeight', 'bold');
+
     yPos = yPos - 25;
-    chkDelRaw = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete raw conversion TIFs', 'Value', cfg.deleteRawTif);
-    yPos = yPos - 25;
-    chkDelInter = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete intermediate processed TIFs', 'Value', cfg.deleteDeconTif);
+    chkDelInter = uicheckbox(fig, 'Position', [30, yPos, 320, 22], ...
+        'Text', 'Delete intermediate processed TIFs', ...
+        'Value', cfg.deleteDeconTif || cfg.deleteRawTif);
 
     % --- Run Button ---
     btnRun = uibutton(fig, 'Position', [190, 20, 100, 35], 'Text', 'Run Pipeline', ...
@@ -121,8 +137,22 @@ function [uiResult, canceled] = launchPipelineGUI()
         baseConfig.dzPSF          = editDzPSF.Value;
         baseConfig.DeconIter      = editIter.Value;
         baseConfig.Background     = editBG.Value;
-        baseConfig.deleteRawTif   = chkDelRaw.Value;
+
+        % z-axis padding settings
+        baseConfig.z_padding = editZPad.Value;
+        if chkZPad.Value
+            baseConfig.z_edge_padding = 'mirror';
+        else
+            baseConfig.z_edge_padding = 'none';
+        end
+
+        % File deletion logic:
+        % User clicking delete intermediates will delete both the initial
+        % TIFs converted from the sld/czi files and the intermediate
+        % deconvolved and deskewed tifs
         baseConfig.deleteDeconTif = chkDelInter.Value;
+        baseConfig.deleteRawTif   = chkDelInter.Value;
+
 
         if chkDeskew.Value && chkDecon.Value
             baseConfig.processingMode = 'both';
@@ -132,7 +162,7 @@ function [uiResult, canceled] = launchPipelineGUI()
             baseConfig.processingMode = 'deskew-only';
         end
 
-        baseConfig.rotate = (bgRotate.SelectedObject == rbRotate);
+        baseConfig.rotate = chkRotate.Value;
 
         uiResult.config = baseConfig;
 
@@ -236,6 +266,7 @@ function cfg = mergeSavedConfig(defaultCfg, savedCfg)
     cfg.dzPSF       = pickNumeric(savedCfg, 'dzPSF',       defaultCfg.dzPSF,       @(x) isfinite(x) && x > 0);
     cfg.DeconIter   = pickNumeric(savedCfg, 'DeconIter',   defaultCfg.DeconIter,   @(x) isfinite(x) && x >= 1 && mod(x,1)==0);
     cfg.Background  = pickNumeric(savedCfg, 'Background',  defaultCfg.Background,  @(x) isfinite(x) && x >= 0);
+    cfg.z_padding   = pickNumeric(savedCfg, 'z_padding',   defaultCfg.z_padding,   @(x) isfinite(x) && x >= 0 && mod(x,1)==0);
 
     % Logicals
     cfg.deleteRawTif   = pickLogical(savedCfg, 'deleteRawTif',   defaultCfg.deleteRawTif);
@@ -248,6 +279,9 @@ function cfg = mergeSavedConfig(defaultCfg, savedCfg)
 
     cfg.deconAlgorithm = pickEnum(savedCfg, 'deconAlgorithm', ...
         {'PetaKit5D','RLGC','petaKit5D'}, defaultCfg.deconAlgorithm);
+
+    cfg.z_edge_padding = pickEnum(savedCfg, 'z_edge_padding', ...
+        {'none','zero','mirror','gaussian','fixed'}, defaultCfg.z_edge_padding);
 
     % Normalise
     if strcmpi(cfg.deconAlgorithm, 'petakit5d')

@@ -19,13 +19,13 @@ function config = getDefaultConfig()
     config.fixed_value = 100;
     
     % Flags for deleting intermediate files.
-    config.deleteRawTif = false;
-    config.deleteDeconTif = false;
+    config.deleteRawTif = true;
+    config.deleteDeconTif = true;
     
     % Deconvolution parameters.
     config.deconAlgorithm = 'PetaKit5D'; % Options: 'petaKit5D', 'RLGC'
     config.RLmethod = 'simplified';
-    config.DeconIter = 1;
+    config.DeconIter = 10;
     config.wienerAlpha = 0.05;
     
     % Acquisition and PSF parameters.
