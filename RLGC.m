@@ -115,24 +115,29 @@ clear psf psf_temp;
 % Preserve original split semantics:
 %   split1 = binornd(floor(img), 0.5)
 %   split2 = img - split1
-img_int  = floor(img);
+img_int = floor(img);
 img_frac = img - img_int;
 
-% Build groups of equal n once, outside the iteration loop
 if isgpuarray(img_int)
     img_int_cpu = gather(img_int);
 else
     img_int_cpu = img_int;
 end
 
-group_n = unique(img_int_cpu(:));
-group_n = double(group_n(:).');   % row vector
-group_n(group_n == 0) = [];       % n = 0 always yields 0, so skip it
+lin_nonzero = find(img_int_cpu > 0);
+vals_nonzero = double(img_int_cpu(lin_nonzero));
+max_val = max(vals_nonzero);
 
-idx_groups = cell(numel(group_n), 1);
-for i = 1:numel(group_n)
-    idx_groups{i} = find(img_int_cpu == group_n(i));  % CPU linear indices
-end
+idx_groups_all = accumarray( ...
+    vals_nonzero, ...
+    lin_nonzero, ...
+    [max_val, 1], ...
+    @(x){x}, ...
+    {[]} );
+
+nonempty = ~cellfun(@isempty, idx_groups_all);
+group_n = find(nonempty);
+idx_groups = idx_groups_all(nonempty);
 
 clear img_int_cpu;
 
