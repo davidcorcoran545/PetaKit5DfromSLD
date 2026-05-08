@@ -1,3 +1,4 @@
+
 function modularPipeline(psfFolder, inputFolder)
 % modularPipeline processes microscope data using decon+deskew and/or deskew-only.
 
@@ -55,8 +56,8 @@ function modularPipeline(psfFolder, inputFolder)
     end
     
     % get size Metadata - assuming same for all PSF channels
-    r=bfGetReader(psfArray(1).fullpath);
-    psf_metadata = getSizeMetadata(r,0);
+    r=bfGetReader(psfArray(1).fullpath);    
+    psf_metadata = getSizeMetadata(r, 0, config, psfArray(1).fullpath);
     r.close();
     
     fprintf('Selected PSF files:\n');
@@ -118,8 +119,8 @@ function modularPipeline(psfFolder, inputFolder)
              end
 
              if strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both')
-                 r=bfGetReader(filePaths{1});
-                 tif3D_metadata = getSizeMetadata(r,0);
+                 r=bfGetReader(filePaths{1});                 
+                 tif3D_metadata = getSizeMetadata(r, 0, config, filePaths{1});
                  r.close();
                  if (abs(tif3D_metadata.pixelSizeZ - psf_metadata.pixelSizeZ)<1e-3)
                      runDeconDeskewPipeline(seriesResult, config);
@@ -169,8 +170,8 @@ function processSldFile(sldFileName, config, psf_metadata)
             continue;  % Skip series with only one Z-slice.
         end
         
-        if strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both')
-            size_metadata = getSizeMetadata(r,S);    
+        if strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both')            
+            size_metadata = getSizeMetadata(r, S, config, sldFileName);
             if (abs(size_metadata.pixelSizeZ - psf_metadata.pixelSizeZ)<1e-3)
                 runDeconDeskewPipeline(seriesResult, config);
             else
@@ -200,8 +201,8 @@ end
 % have changed to storing it as uint16. double may be necessary for later
 % maths calculations. 
 
-function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, psf_metadata)
-    size_metadata = getSizeMetadata(r, seriesIndex);
+function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, psf_metadata)    
+    size_metadata = getSizeMetadata(r, seriesIndex, config, sldFileName);
     omeMeta = r.getMetadataStore();
     
     % Calculate the deskewed Z spacing
@@ -361,45 +362,66 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     
 end
 
-function size_metadata = getSizeMetadata(r, seriesIndex)
+function size_metadata = getSizeMetadata(r, seriesIndex, config, sourceName)
+    % Robust metadata reader with simple warnings and safe fallbacks
+
+    if nargin < 3 || ~isstruct(config)
+        config = getDefaultConfig();
+    end
+    if nargin < 4 || isempty(sourceName)
+        sourceName = '<unknown source>';
+    end
+
+    % Safe fallback values
+    defaultConfig = getDefaultConfig();
+    if ~isfield(config, 'xyPixelSize') || ~isscalar(config.xyPixelSize) || ~isfinite(config.xyPixelSize) || config.xyPixelSize <= 0
+        config.xyPixelSize = defaultConfig.xyPixelSize;
+    end
+    if ~isfield(config, 'dz') || ~isscalar(config.dz) || ~isfinite(config.dz) || config.dz <= 0
+        config.dz = defaultConfig.dz;
+    end
+
     omeMeta = r.getMetadataStore();
-    % Extract image dimensions.
+
+    % Dimensions
     size_metadata.stackSizeX = omeMeta.getPixelsSizeX(seriesIndex).getValue();
     size_metadata.stackSizeY = omeMeta.getPixelsSizeY(seriesIndex).getValue();
     size_metadata.stackSizeZ = omeMeta.getPixelsSizeZ(seriesIndex).getValue();
     size_metadata.stackSizeC = omeMeta.getPixelsSizeC(seriesIndex).getValue();
     size_metadata.stackSizeT = omeMeta.getPixelsSizeT(seriesIndex).getValue();
-    
-    % Get physical pixel sizes. If unavailable (or NaN) then substitute defaults from config.
-    pixelSizeX_obj = omeMeta.getPixelsPhysicalSizeX(seriesIndex);
-    if isempty(pixelSizeX_obj)
-        size_metadata.pixelSizeX = config.xyPixelSize;
-    else
-        size_metadata.pixelSizeX = double(pixelSizeX_obj.value());
-        if isnan(size_metadata.pixelSizeX)
-            size_metadata.pixelSizeX = config.xyPixelSize;
+
+    % Physical sizes with fallback
+    size_metadata.pixelSizeX = readPhysicalSize( ...
+        @() omeMeta.getPixelsPhysicalSizeX(seriesIndex), ...
+        config.xyPixelSize, 'X', sourceName, seriesIndex);
+
+    size_metadata.pixelSizeY = readPhysicalSize( ...
+        @() omeMeta.getPixelsPhysicalSizeY(seriesIndex), ...
+        config.xyPixelSize, 'Y', sourceName, seriesIndex);
+
+    size_metadata.pixelSizeZ = readPhysicalSize( ...
+        @() omeMeta.getPixelsPhysicalSizeZ(seriesIndex), ...
+        config.dz, 'Z', sourceName, seriesIndex);
+end
+
+function val = readPhysicalSize(getter, fallback, axisName, sourceName, seriesIndex)
+    val = fallback;
+    try
+        obj = getter();
+        if ~isempty(obj)
+            tmp = double(obj.value());
+            if isfinite(tmp) && tmp > 0
+                val = tmp;
+                return;
+            end
         end
+    catch
+        % ignore, use fallback below
     end
-    
-    pixelSizeY_obj = omeMeta.getPixelsPhysicalSizeY(seriesIndex);
-    if isempty(pixelSizeY_obj)
-        size_metadata.pixelSizeY = config.xyPixelSize;
-    else
-        size_metadata.pixelSizeY = double(pixelSizeY_obj.value());
-        if isnan(size_metadata.pixelSizeY)
-            size_metadata.pixelSizeY = config.xyPixelSize;
-        end
-    end
-    
-    pixelSizeZ_obj = omeMeta.getPixelsPhysicalSizeZ(seriesIndex);
-    if isempty(pixelSizeZ_obj)
-        size_metadata.pixelSizeZ = config.dz;
-    else
-        size_metadata.pixelSizeZ = double(pixelSizeZ_obj.value());
-        if isnan(size_metadata.pixelSizeZ)
-            size_metadata.pixelSizeZ = config.dz;
-        end
-    end
+
+    warning('modularPipeline:MetadataFallback', ...
+        'Physical pixel size %s metadata unavailable or invalid for "%s" (series %d). Using fallback value %.6g um.', ...
+        axisName, sourceName, seriesIndex, fallback);
 end
 
 %% -----------------------------------------------------------------------
@@ -521,26 +543,56 @@ end
 function runDeconDeskewPipeline(seriesResult, config)
     fprintf('Running deconvolution+deskew pipeline for series: %s\n', seriesResult.currentSeriesFolder);
     
-    % Deconvolution step.
-    XR_decon_data_wrapper(seriesResult.tifDir, 'resultDirName', config.resultDirName, 'xyPixelSize', config.xyPixelSize, ...
-                'dz', config.dz, 'Reverse', config.Reverse, 'ChannelPatterns', config.ChannelPatterns, 'PSFFullpaths', config.PSFFullpaths, ...
-                'dzPSF', config.dzPSF, 'parseSettingFile', config.parseSettingFile, 'RLmethod', config.RLmethod, ...
-                'wienerAlpha', config.wienerAlpha, 'OTFCumThresh', config.OTFCumThresh, 'skewed', config.skewed, ...
-                'Background', config.Background, 'CPPdecon', false, 'CudaDecon', false, 'DeconIter', config.DeconIter, ...
-                'fixIter', config.fixIter, 'EdgeErosion', config.EdgeErosion, 'Save16bit', config.Save16bit, ...
-                'zarrFile', config.zarrFile, 'saveZarr', config.saveZarr, 'parseCluster', config.parseCluster, ...
-                'largeFile', config.largeFile, 'GPUJob', config.GPUJob, 'debug', config.debug, 'cpusPerTask', config.cpusPerTask, ...
-                'ConfigFile', config.ConfigFile, 'GPUConfigFile', config.GPUConfigFile, 'mccMode', config.mccMode);
+    % --- Deconvolution step ---
+    if isfield(config, 'deconAlgorithm') && strcmp(config.deconAlgorithm, 'RLGC')
+        % RLGC Branch
+        deconDir = fullfile(seriesResult.tifDir, config.resultDirName);
+        if ~exist(deconDir, 'dir')
+            mkdir(deconDir);
+        end
+        
+        fileList = dir(fullfile(seriesResult.tifDir, '*.tif'));
+        for fIdx = 1:length(fileList)
+            fileName = fileList(fIdx).name;
+            filePath = fullfile(fileList(fIdx).folder, fileName);
             
+            % Extract channel number from filename to match correct PSF
+            tokens = regexp(fileName, '_Ch(\d+)', 'tokens');
+            if ~isempty(tokens)
+                chStr = ['Ch' tokens{1}{1}];
+                psfIdx = find(strcmp(config.ChannelPatterns, chStr), 1);
+                
+                if ~isempty(psfIdx)
+                    psfPath = config.PSFFullpaths{psfIdx};
+                    outPath = fullfile(deconDir, fileName);
+                    RLGC(filePath, psfPath, outPath, config.Background, config.Save16bit);
+                else
+                    warning('Could not find matching PSF for channel %s. Skipping %s.', chStr, fileName);
+                end
+            end
+        end
+    else
+        % Original Branch
+        XR_decon_data_wrapper(seriesResult.tifDir, 'resultDirName', config.resultDirName, 'xyPixelSize', config.xyPixelSize, ...
+                    'dz', config.dz, 'Reverse', config.Reverse, 'ChannelPatterns', config.ChannelPatterns, 'PSFFullpaths', config.PSFFullpaths, ...
+                    'dzPSF', config.dzPSF, 'parseSettingFile', config.parseSettingFile, 'RLmethod', config.RLmethod, ...
+                    'wienerAlpha', config.wienerAlpha, 'OTFCumThresh', config.OTFCumThresh, 'skewed', config.skewed, ...
+                    'Background', config.Background, 'CPPdecon', false, 'CudaDecon', false, 'DeconIter', config.DeconIter, ...
+                    'fixIter', config.fixIter, 'EdgeErosion', config.EdgeErosion, 'Save16bit', config.Save16bit, ...
+                    'zarrFile', config.zarrFile, 'saveZarr', config.saveZarr, 'parseCluster', config.parseCluster, ...
+                    'largeFile', config.largeFile, 'GPUJob', config.GPUJob, 'debug', config.debug, 'cpusPerTask', config.cpusPerTask, ...
+                    'ConfigFile', config.ConfigFile, 'GPUConfigFile', config.GPUConfigFile, 'mccMode', config.mccMode);
+    end
+    
     if config.GPUJob && gpuDeviceCount('available') > 0
          reset(gpuDevice);
     end
     
-    % % Remove z-padding from the decon results, before we deskew.
+    % Remove z-padding from the decon results, before we deskew.
     deconDir = fullfile(seriesResult.tifDir, config.resultDirName);
     removePaddingFromDir(deconDir, config);
 
-    % Deskew step.
+    % --- Deskew step ---.
     dataPath_exps = fullfile(seriesResult.tifDir, config.resultDirName);
     XR_deskew_rotate_data_wrapper(dataPath_exps, 'skewAngle', config.skewAngle, 'flipZstack', config.flipZstack, ...
         'DSRCombined', config.DSRCombined, 'rotate', config.rotate, 'xyPixelSize', config.xyPixelSize, 'dz', config.dz, ...
@@ -585,7 +637,7 @@ function runDeskewOnlyPipeline(seriesResult, config)
         inputDir = seriesResult.tifDir;
     end
 
-    XR_deskew_rotate_data_wrapper(seriesResult.tifDir, 'resultDirName', config.resultDirNameDeskew, 'skewAngle', config.skewAngle, 'flipZstack', config.flipZstack, ...
+    XR_deskew_rotate_data_wrapper(inputDir, 'resultDirName', config.resultDirNameDeskew, 'skewAngle', config.skewAngle, 'flipZstack', config.flipZstack, ...
         'DSRCombined', config.DSRCombined, 'rotate', config.rotate, 'xyPixelSize', config.xyPixelSize, 'dz', config.dz, ...
         'Reverse', config.Reverse, 'ChannelPatterns', config.ChannelPatterns, 'largeFile', config.largeFile, ...
         'zarrFile', config.zarrFile, 'saveZarr', config.saveZarr, 'Save16bit', config.Save16bit, 'parseCluster', config.parseCluster, ...
@@ -596,9 +648,9 @@ function runDeskewOnlyPipeline(seriesResult, config)
     
     % If rotation is enabled then merge the 'DSR' folder, otherwise 'DS'
     if config.rotate
-        deskewDSDir = fullfile(seriesResult.tifDir, [config.resultDirNameDeskew, 'R']); % e.g., 'DSR'
+        deskewDSDir = fullfile(inputDir, [config.resultDirNameDeskew, 'R']); % e.g., 'DSR'
     else
-        deskewDSDir = fullfile(seriesResult.tifDir, config.resultDirNameDeskew); % e.g., 'DS'
+        deskewDSDir = fullfile(inputDir, config.resultDirNameDeskew); % e.g., 'DS'
     end
     
     if isfield(config,'skewDirection')
@@ -680,214 +732,9 @@ function deleteFilesInDir(targetDir)
     end
 end
 
-%% -----------------------------------------------------------------------
-%% Local Function: getDefaultConfig
-function config = getDefaultConfig()
-    % Folder settings (these will be updated by the user selections).
-    config.inputFolder = '';   % The folder to deconvolve (set via UI)
-    
-    % PSF related settings will be updated via UI:
-    config.PSFFullpaths = {};  % Cell array of PSF file paths.
-    config.ChannelPatterns = {}; % Patterns (e.g., 'Ch1','Ch2', ...) for each channel.
-    
-    % Imaging parameters.
-    config.dz = 0.5;
-    config.xyPixelSize = 0.104;
-    
-    % z–axis padding settings.
-    config.z_edge_padding = 'none';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
-    config.z_padding = 30;  % this needs to come with a warning about not padding more than half the size of the stack
-    config.gaussian_mean = 102.27;
-    config.gaussian_std = 3.17;
-    config.fixed_value = 100;
-    
-    % Flags for deleting intermediate files.
-    config.deleteRawTif = false;
-    config.deleteDeconTif = false;
-    
-    % Deconvolution parameters.
-    config.RLmethod = 'simplified';
-    config.DeconIter = 1;
-    config.wienerAlpha = 0.05;
-    
-    % Acquisition and PSF parameters.
-    config.Reverse = true;
-    config.dzPSF = 0.5;
-    config.parseSettingFile = false;
-    % The ChannelPatterns and PSFFullpaths will be updated from the PSF folder.
-    config.OTFCumThresh = 0.9;
-    config.skewed = true;
-    config.Background = 100;
-    config.fixIter = true;
-    config.EdgeErosion = 0;
-    config.Save16bit = true;
-    config.zarrFile = false;
-    config.saveZarr = false;
-    config.cpusPerTask = 4;
-    config.parseCluster = false;
-    config.largeFile = false;
-    config.GPUJob = true;
-    config.debug = false;
-    config.ConfigFile = '';
-    config.GPUConfigFile = '';
-    config.mccMode = false;
-    
-    % Deskew and rotation parameters.
-    config.rotate = false;
-    config.skewAngle = 32.8;
-    config.flipZstack = true;
-    config.DSRCombined = false;
-    config.masterCompute = true;
-    config.configFile = '';
-    
-    % Processing mode: Choose 'deskew-only', 'decon+deskew', or 'both'.
-    config.processingMode = 'decon+deskew';
-    
-    % Output folder names.
-    config.resultDirName = 'deconvolved';       % For deconvolution+deskew branch.
-    config.resultDirNameDeskew = 'DS';   % For deskew-only branch.
-end
-
+% move this in future
 function config = getCziDefaultConfig(config)
     config.xyPixelSize = 0.1449922;
     config.skewAngle = 30.0;
     config.skewDirection = 'Y';
-end
-
-%% -----------------------------------------------------------------------
-%% Local Function: launchPipelineGUI
-function [uiResult, canceled] = launchPipelineGUI()
-    % Setup defaults and initialize outputs
-    canceled = true;
-    uiResult = struct();
-    
-    % Load saved folder paths if they exist
-    if ispref('ModPipeline', 'lastPSF')
-        defaultPSF = getpref('ModPipeline', 'lastPSF');
-    else
-        defaultPSF = pwd;
-    end
-    
-    if ispref('ModPipeline', 'lastInput')
-        defaultInput = getpref('ModPipeline', 'lastInput');
-    else
-        defaultInput = pwd;
-    end
-
-    % Increased height to 680 to properly fit everything
-    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 480, 680]);
-    
-    % --- 1. Folders ---
-    yPos = 630; % Shifted starting position up
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
-    
-    yPos = yPos - 30;
-    btnPSF = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select PSF Folder');
-    lblPSF = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultPSF, 'Interpreter', 'none');
-    btnPSF.ButtonPushedFcn = @(btn,event) folderSelect(lblPSF, 'Select PSF Folder');
-    
-    yPos = yPos - 30;
-    btnInput = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select Input Folder');
-    lblInput = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultInput, 'Interpreter', 'none');
-    btnInput.ButtonPushedFcn = @(btn,event) folderSelect(lblInput, 'Select Input Folder');
-
-    % --- 2. Parameters ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '2. Microscope & PSF Settings', 'FontWeight', 'bold');
-    
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image z-step size (microns):');
-    editDz = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.5);
-    
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'Image XY pixel size (microns):');
-    editXY = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.104);
-    
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 200, 22], 'Text', 'PSF z-step size (microns):');
-    editDzPSF = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 0.5);
-
-    % --- 3. Processing Mode ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '3. Processing Mode', 'FontWeight', 'bold');
-    yPos = yPos - 25;
-    chkDeskew = uicheckbox(fig, 'Position', [30, yPos, 150, 22], 'Text', 'Deskew', 'Value', 0);
-    yPos = yPos - 25;
-    chkDecon = uicheckbox(fig, 'Position', [30, yPos, 200, 22], 'Text', 'Deconvolve and then deskew', 'Value', 1);
-
-    % --- 4. Deconvolution Settings ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '4. Deconvolution Settings', 'FontWeight', 'bold');
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Number of Deconvolution Iterations:');
-    editIter = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 1);
-    yPos = yPos - 30;
-    uilabel(fig, 'Position', [20, yPos, 220, 22], 'Text', 'Background value to subtract:');
-    editBG = uieditfield(fig, 'numeric', 'Position', [250, yPos, 80, 22], 'Value', 100);
-
-    % --- 5. Rotation ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '5. Rotation / Coverslip Correction', 'FontWeight', 'bold');
-    yPos = yPos - 50;
-    bgRotate = uibuttongroup(fig, 'Position', [20, yPos, 300, 50], 'BorderType', 'none');
-    uiradiobutton(bgRotate, 'Position', [10, 25, 250, 22], 'Text', 'Deskew');
-    rbRotate = uiradiobutton(bgRotate, 'Position', [10, 5, 280, 22], 'Text', 'Deskew and coverslip correct (rotate)');
-
-    % --- 6. File Management ---
-    yPos = yPos - 40;
-    uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '6. File Management', 'FontWeight', 'bold');
-    yPos = yPos - 25;
-    chkDelRaw = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete raw conversion TIFs', 'Value', 0);
-    yPos = yPos - 25;
-    chkDelInter = uicheckbox(fig, 'Position', [30, yPos, 250, 22], 'Text', 'Delete intermediate processed TIFs', 'Value', 0);
-
-    % --- Run Button ---
-    % Button is safely at the bottom (y=20) while the last checkbox is now at y=70.
-    btnRun = uibutton(fig, 'Position', [190, 20, 100, 35], 'Text', 'Run Pipeline', ...
-        'ButtonPushedFcn', @runPipeline);
-
-    drawnow;    
-    uiwait(fig);
-
-    % --- Callbacks ---
-    function folderSelect(lblTarget, promptTitle)
-        startPath = lblTarget.Text;
-        if ~isfolder(startPath), startPath = pwd; end
-        selectedFolder = uigetdir(startPath, promptTitle);
-        if selectedFolder ~= 0, lblTarget.Text = selectedFolder; end
-    end
-
-    function runPipeline(~, ~)
-        setpref('ModPipeline', 'lastPSF', lblPSF.Text);
-        setpref('ModPipeline', 'lastInput', lblInput.Text);
-
-        baseConfig = getDefaultConfig(); 
-        baseConfig.inputFolder = lblInput.Text;
-        uiResult.psfFolder     = lblPSF.Text;
-        
-        % Mapping values
-        baseConfig.dz          = editDz.Value;
-        baseConfig.xyPixelSize = editXY.Value;
-        baseConfig.dzPSF       = editDzPSF.Value;
-        baseConfig.DeconIter   = editIter.Value;
-        baseConfig.Background  = editBG.Value;
-        
-        % Mapping Cleanup Flags
-        baseConfig.deleteRawTif   = chkDelRaw.Value;
-        baseConfig.deleteDeconTif = chkDelInter.Value;
-        
-        if chkDeskew.Value && chkDecon.Value
-            baseConfig.processingMode = 'both';
-        elseif chkDecon.Value
-            baseConfig.processingMode = 'decon+deskew';
-        else
-            baseConfig.processingMode = 'deskew-only';
-        end
-        
-        baseConfig.rotate = (bgRotate.SelectedObject == rbRotate);
-
-        uiResult.config = baseConfig;
-        canceled = false;
-        delete(fig);
-    end
 end
