@@ -10,18 +10,32 @@ function [uiResult, canceled] = launchPipelineGUI()
     defaultPSF   = uiState.psfFolder;
     defaultInput = uiState.inputFolder;
     cfg          = uiState.config;
+    
+    % Try to load output folder safely, otherwise default to input folder
+    if isfield(uiState, 'config') && isfield(uiState.config, 'outputFolder')
+        defaultOutput = uiState.config.outputFolder;
+    else
+        defaultOutput = defaultInput;
+    end
+
+    cfg          = uiState.config;
 
     % Increase the below if you add more features to give more room
-    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 660]);
+    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 700]);
 
     % --- 1. Folders ---
-    yPos = 630; 
+    yPos = 670; 
     uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
     
     yPos = yPos - 30;
     btnInput = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select Input Folder');
     lblInput = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultInput, 'Interpreter', 'none');
     btnInput.ButtonPushedFcn = @(btn,event) folderSelect(lblInput, 'Select Input Folder');
+
+    yPos = yPos - 30;
+    btnOutput = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select Output Folder');
+    lblOutput = uilabel(fig, 'Position', [150, yPos, 310, 22], 'Text', defaultOutput, 'Interpreter', 'none');
+    btnOutput.ButtonPushedFcn = @(btn,event) folderSelect(lblOutput, 'Select Output Folder');
 
     yPos = yPos - 30;
     btnPSF = uibutton(fig, 'Position', [20, yPos, 120, 22], 'Text', 'Select PSF Folder');
@@ -126,8 +140,9 @@ function [uiResult, canceled] = launchPipelineGUI()
     end
 
     function runPipeline(~, ~)
-        baseConfig = getDefaultConfig();
+        baseConfig = getDefaultConfig();        
         baseConfig.inputFolder = lblInput.Text;
+        baseConfig.outputFolder = lblOutput.Text;
         uiResult.psfFolder     = lblPSF.Text;
 
         % Map GUI values

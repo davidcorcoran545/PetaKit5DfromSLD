@@ -1,9 +1,11 @@
-function modularPipeline(psfFolder, inputFolder)
+function modularPipeline(psfFolder, inputFolder, outputFolder)
 % modularPipeline processes microscope data using decon+deskew and/or deskew-only.
-    
+% check whether tif files as input are processed correctly
+% I may have broken them when I added an option specify the output folder
+
     % --- UI: Ask the User for Required Folders and Config ---
     % If paths are not provided via arguments, launch the GUI
-    if nargin < 2 || isempty(psfFolder) || isempty(inputFolder)
+    if nargin < 3 || isempty(psfFolder) || isempty(inputFolder) || isempty(outputFolder)
         [uiResult, isCanceled] = launchPipelineGUI();
         
         if isCanceled
@@ -17,6 +19,7 @@ function modularPipeline(psfFolder, inputFolder)
         % If run programmatically, just use defaults and the provided paths
         config = getDefaultConfig();
         config.inputFolder = inputFolder;
+        config.outputFolder = outputFolder;
     end
 
     %% --- Suppress Bio-Formats debug/info logging ---
@@ -71,6 +74,7 @@ function modularPipeline(psfFolder, inputFolder)
     fprintf('Channel Patterns:\n');
     disp(config.ChannelPatterns);
     fprintf('Processing files in folder: %s\n', config.inputFolder);
+    fprintf('Saving output files to folder: %s\n', config.outputFolder);
     
     %% --- Process the Input Data ---
     % Determine if the input folder contains .sld, .czi or .tif files.
@@ -195,13 +199,19 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: convertSeriesToTif
+% Doesn't work well when processing files stored remotely
+% The parfor loop overwhelms the network with multiple works trying to
+% access the same file. 
+
 % some speed improvements (~4-5 times faster) with parfor and two other changes. 
 % It avoids copying the entire array every z-slice. 
 % It may run out of memory in some situations
 % Maybe bad if the size of each timepoint*number of cpu-cores is bigger than RAM. 
 % In future could limit the number of workers based on the size of a timepoint and the available ram
+
 % Also fixed a problem with original code not returning the correct time
 % metadata, possibly partly due to a slidebook bug
+
 % also check if it's doing the right thing with the number format,
 % previously it was storing each plane as a double in the array, this may
 % have changed to storing it as uint16. double may be necessary for later
@@ -245,7 +255,8 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
         currentSeriesFolder = baseFileName;
     end
     
-    currentSeriesPath = fullfile(config.inputFolder, currentSeriesFolder);
+    currentSeriesPath = fullfile(config.outputFolder, currentSeriesFolder);
+
     if ~exist(currentSeriesPath, 'dir')
         mkdir(currentSeriesPath);
     end

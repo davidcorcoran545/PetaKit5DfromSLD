@@ -3,6 +3,9 @@ function config = getDefaultConfig()
     % Folder settings (these will be updated by the user selections).
     config.inputFolder = '';   % The folder to deconvolve (set via UI)
     
+    % Output folder
+    config.outputFolder = '';  % The folder to save all outputs and intermediate files
+
     % PSF related settings will be updated via UI:
     config.PSFFullpaths = {};  % Cell array of PSF file paths.
     config.ChannelPatterns = {}; % Patterns (e.g., 'Ch1','Ch2', ...) for each channel.
