@@ -292,7 +292,20 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     fprintf('Starting parallel conversion of %d timepoints...\n', stackSizeT);
 
     % --- BEGIN PARALLEL PROCESSING ---
-    parfor T = 0:stackSizeT-1
+    
+    % Initialize ONE reader per worker to prevent network lock collisions 
+    % and massive metadata parsing overhead.
+    readerFactory = @() initWorkerReader(sldFileName, seriesIndex);
+    readerCleanup = @(r) safeCloseReader(r);
+    workerReaderConst = parallel.pool.Constant(readerFactory, readerCleanup);
+        
+    % needs testing
+    % Dynamically determine safe worker count based on current hardware
+    % Possibly will prevent network I/O and RAM exhaustion
+    maxWorkers = determineOptimalWorkers(); 
+    fprintf('Dynamically allocated %d workers for this machine.\n', maxWorkers);
+    
+    parfor (T = 0:stackSizeT-1, maxWorkers)
         % Suppress Bio-Formats debug/info logging
         try
             loci.common.DebugTools.setRootLevel('WARN');
@@ -300,11 +313,8 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
             % If Bio-Formats is not available yet, do nothing
         end       
         
-        % Create a worker-specific reader for this timepoint
-        worker_r = bfGetReader(sldFileName);
-        % Closes the reader even if there's an error
-        cleanupObj = onCleanup(@() worker_r.close());
-        worker_r.setSeries(seriesIndex);
+        % Access the persistent reader assigned to this specific worker
+        worker_r = workerReaderConst.Value;
         
         for C = 0:stackSizeC-1
             % Memory Guard Logic
@@ -343,7 +353,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
             tifFileName = fullfile(tifDir, sprintf('%s_S%s_T%s_Ch%s.tif', baseFileName, strS, strT, strC));
             
             % Check rotation once to save repetition
-            rotateY = isfield(config,'skewDirection') && (config.skewDirection == 'Y');
+            rotateY = isfield(config,'skewDirection') && strcmpi(config.skewDirection, 'Y');
 
             % Write and optionally pad the tif file depending on the processing mode 
             if strcmp(config.processingMode, 'deskew-only')
@@ -478,6 +488,12 @@ switch config.z_edge_padding
         paddedArray = padarray(array, [0, 0, config.z_padding], 0, 'both');
     case 'mirror'
         % Mirrors the skewed data, skews the padded areas for realism, 
+        % Needs testing more. 
+        % Also should it be modified to ignore the first and last slice?
+        % Currently it includes these outer slices in the mirror, which
+        % means the structures perhaps aren't as realistic as possible
+        % possibly why there's an artefact in the deconvolution (high background) for the
+        % first real slice and the neighbouring mirrored slice
         % --- SETUP ---
         [ny, nx, nz] = size(array);
         zPad = config.z_padding;
@@ -599,6 +615,7 @@ function runDeconDeskewPipeline(seriesResult, config)
         end
     else
         % Original Branch
+        % Test whether this could be faster, doesn't seem to use many cores
         XR_decon_data_wrapper(seriesResult.tifDir, 'resultDirName', config.resultDirName, 'xyPixelSize', config.xyPixelSize, ...
                     'dz', config.dz, 'Reverse', config.Reverse, 'ChannelPatterns', config.ChannelPatterns, 'PSFFullpaths', config.PSFFullpaths, ...
                     'dzPSF', config.dzPSF, 'parseSettingFile', config.parseSettingFile, 'RLmethod', config.RLmethod, ...
@@ -641,7 +658,7 @@ function runDeconDeskewPipeline(seriesResult, config)
     else
         paraMergeTiffFilesToMultiDimStack(deconDSDir, outputTiffFile, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval);
     end
-    
+
     outputTiffFileMax = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_decondeskew_MAX.tif']);
     inputToMergeMax = fullfile(deconDSDir, 'MIPs');
     if isfield(config,'skewDirection')
@@ -758,9 +775,67 @@ function deleteFilesInDir(targetDir)
     end
 end
 
+%% -----------------------------------------------------------------------
+%% Local Function: initWorkerReader
+function r = initWorkerReader(fileName, seriesIndex)
+try
+    % 1. Force the MATLAB worker to load the Bio-Formats Java library
+    % The '1' argument prevents it from prompting the user in the console
+    bfCheckJavaPath(1);
+
+    % 2. Initialize the reader without the Memoizer
+    baseReader = loci.formats.ImageReader();
+    filler = loci.formats.ChannelFiller(baseReader);
+    r = loci.formats.ChannelSeparator(filler);
+    r.setId(fileName);
+    r.setSeries(seriesIndex);
+catch ME
+    error('Failed to initialise Bio-Formats reader on worker for file "%s", series %d. Reason: %s', ...
+        fileName, seriesIndex, ME.message);
+end
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: safeCloseReader
+function safeCloseReader(r)
+% Defensively close the reader to prevent "Dot indexing" crashes 
+% if the reader failed to initialize properly.
+if ~isempty(r) && (isobject(r) || isjava(r))
+    try
+        r.close();
+    catch
+        % Ignore errors during cleanup
+    end
+end
+end
+
 % move this in future
 function config = getCziDefaultConfig(config)
     config.xyPixelSize = 0.1449922;
     config.skewAngle = 30.0;
     config.skewDirection = 'Y';
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: determineOptimalWorkers
+function optimalWorkers = determineOptimalWorkers()
+% Dynamically calculates safe worker limits based on the computer's hardware
+
+% 1. Get the number of physical CPU cores (not logical threads)
+physicalCores = feature('numcores');
+
+% 2. Calculate a safe baseline (Use half of available physical cores)
+% A 4-core laptop gets 2 workers. Your 26-core machine gets 13 workers.
+baseWorkers = floor(physicalCores / 2);
+
+% 3. Set a strict ceiling to protect the hard drive from I/O bottlenecking
+% Even on a massive supercomputer, 12 workers reading TIFFs simultaneously
+% is usually the absolute limit for standard NVMe SSDs.
+ioCeiling = 12; 
+
+% 4. Choose the safest number
+optimalWorkers = min(baseWorkers, ioCeiling);
+
+% Ensure it never returns less than 1
+optimalWorkers = max(1, optimalWorkers);
 end
