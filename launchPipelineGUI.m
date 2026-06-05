@@ -10,21 +10,20 @@ function [uiResult, canceled] = launchPipelineGUI()
     defaultPSF   = uiState.psfFolder;
     defaultInput = uiState.inputFolder;
     cfg          = uiState.config;
-    
+
     % Try to load output folder safely, otherwise default to input folder
-    if isfield(uiState, 'config') && isfield(uiState.config, 'outputFolder')
-        defaultOutput = uiState.config.outputFolder;
+    if isfield(cfg, 'outputFolder') && isTextScalar(cfg.outputFolder) && isfolder(cfg.outputFolder)
+        defaultOutput = char(cfg.outputFolder);
     else
         defaultOutput = defaultInput;
+        cfg.outputFolder = defaultOutput;
     end
-
-    cfg          = uiState.config;
 
     % Increase the below if you add more features to give more room
     fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 790]);
 
     % --- 1. Folders ---
-    yPos = 760; 
+    yPos = 760;
     uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
     
     yPos = yPos - 30;
@@ -258,6 +257,10 @@ function uiState = loadLastUIState()
                     uiState.config.inputFolder = char(saved.inputFolder);
                 end
 
+                if isfield(saved, 'outputFolder') && isTextScalar(saved.outputFolder) && isfolder(saved.outputFolder)
+                    uiState.config.outputFolder = char(saved.outputFolder);
+                end
+
                 % Config
                 if isfield(saved, 'config') && isstruct(saved.config)
                     uiState.config = mergeSavedConfig(uiState.config, saved.config);
@@ -279,6 +282,12 @@ function uiState = loadLastUIState()
                         uiState.config.inputFolder = char(tmp);
                     end
                 end
+                if ispref('ModPipeline', 'lastOutput')
+                    tmp = getpref('ModPipeline', 'lastOutput');
+                    if isTextScalar(tmp) && isfolder(tmp)
+                        uiState.config.outputFolder = char(tmp);
+                    end
+                end                
             catch
                 % Ignore and keep defaults
             end
@@ -306,13 +315,25 @@ function saveLastUIState(psfFolder, inputFolder, config)
         saved = struct();
         saved.psfFolder   = char(psfFolder);
         saved.inputFolder = char(inputFolder);
-        saved.config      = sanitizeConfigForSave(config);
+
+        if isfield(config, 'outputFolder') && isTextScalar(config.outputFolder)
+            saved.outputFolder = char(config.outputFolder);
+        else
+            saved.outputFolder = char(inputFolder);
+        end
+
+        saved.config = sanitizeConfigForSave(config);
+
+        % Make absolutely sure these survive sanitisation
+        saved.config.inputFolder  = saved.inputFolder;
+        saved.config.outputFolder = saved.outputFolder;
 
         setpref('ModPipeline', 'lastUIState', saved);
 
         % Optional: keep old prefs too for compatibility/debugging
         setpref('ModPipeline', 'lastPSF', saved.psfFolder);
         setpref('ModPipeline', 'lastInput', saved.inputFolder);
+        setpref('ModPipeline', 'lastOutput', saved.outputFolder);
     catch
         % Intentionally do nothing:
         % failure to save preferences should never block processing
@@ -321,6 +342,22 @@ end
 
 function cfg = mergeSavedConfig(defaultCfg, savedCfg)
     cfg = defaultCfg;
+    
+    % Folder paths
+    if isfield(defaultCfg, 'inputFolder') && isTextScalar(defaultCfg.inputFolder)
+        defaultInputFolder = char(defaultCfg.inputFolder);
+    else
+        defaultInputFolder = pwd;
+    end
+
+    if isfield(defaultCfg, 'outputFolder') && isTextScalar(defaultCfg.outputFolder)
+        defaultOutputFolder = char(defaultCfg.outputFolder);
+    else
+        defaultOutputFolder = defaultInputFolder;
+    end
+
+    cfg.inputFolder  = pickFolder(savedCfg, 'inputFolder',  defaultInputFolder,  true);
+    cfg.outputFolder = pickFolder(savedCfg, 'outputFolder', defaultOutputFolder, true);
 
     % Numeric scalars
     cfg.dz          = pickNumeric(savedCfg, 'dz',          defaultCfg.dz,          @(x) isfinite(x) && x > 0);
@@ -420,4 +457,23 @@ function val = pickEnum(s, fieldName, validValues, defaultVal)
         end
     catch
     end
+end
+
+function val = pickFolder(s, fieldName, defaultVal, requireExists)
+val = defaultVal;
+
+try
+    if isfield(s, fieldName)
+        x = s.(fieldName);
+
+        if isTextScalar(x)
+            x = char(x);
+
+            if ~requireExists || isfolder(x)
+                val = x;
+            end
+        end
+    end
+catch
+end
 end

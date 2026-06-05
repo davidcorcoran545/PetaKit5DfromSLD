@@ -556,85 +556,113 @@ switch config.z_edge_padding
     case 'zero'
         paddedArray = padarray(array, [0, 0, config.z_padding], 0, 'both');
     case 'mirror'
-        % Mirrors the skewed data, skews the padded areas for realism, 
-        % Needs testing more. 
-        % Also should it be modified to ignore the first and last slice?
-        % Currently it includes these outer slices in the mirror, which
-        % means the structures perhaps aren't as realistic as possible
-        % possibly why there's an artefact in the deconvolution (high background) for the
-        % first real slice and the neighbouring mirrored slice
-        % --- SETUP ---
+        % Mirrors the skewed data, then skews the padded areas for realism,
+        % Does not duplicate the first or last real slice.
+        % Needs testing more.
+
         [ny, nx, nz] = size(array);
         zPad = config.z_padding;
-        
+
+        if zPad == 0
+            paddedArray = array;
+            return;
+        end
+
+        if nz < 2
+            error('Cannot mirror-pad Z when the stack has fewer than 2 slices.');
+        end
+
         % --- SLOPE CALCULATION ---
-        % z_step (0.5) / x_pixel (0.104) * tan(32.8)
-        % Theoretical slope is ~-3.0978 pixels. Using -3.55 as a working estimate.
-        % In future replace with calculated version depending on z-step xpixel and angle, also allow zeiss/czi
-        baseSlope = -3.55;         
-        
+        % z_step / x_pixel * tan(skewAngle)
+        % Theoretical slope is ~-3.0978 pixels for 0.5 / 0.104 at 32.8 deg.
+        % Using -3.55 as current empirical working estimate.
+        baseSlope = -3.55;
+
         % --- INITIALIZE PADDED ARRAY ---
-        totalZ = nz + (2 * zPad);
+        totalZ = nz + 2 * zPad;
         paddedArray = zeros(ny, nx, totalZ, 'like', array);
-        
+
         % 1. PLACE ORIGINAL DATA IN THE CENTER
-        paddedArray(:, :, zPad+1 : zPad+nz) = array;
-        
-        % 2. BOTTOM PADDING (Slices 1 to zPad)
+        paddedArray(:, :, zPad + 1 : zPad + nz) = array;
+
+        % 2. Build Z reflection indices without duplicating edge slices.
+        zIdxWithPrePad  = mirrorIndexVector(nz, zPad, 0);
+        zIdxWithPostPad = mirrorIndexVector(nz, 0, zPad);
+
+        bottomSourceZ = zIdxWithPrePad(1:zPad);
+        topSourceZ    = zIdxWithPostPad(nz + 1 : nz + zPad);
+
+        % 3. BOTTOM Z PADDING
         for i = 1:zPad
             targetZ = i;
-            sourceZ_in_orig = zPad - i + 1;
+            sourceZ_in_orig = bottomSourceZ(i);
+
+            % Distance in padded-Z coordinates between target slice and the
+            % source real slice. This preserves the skew translation.
             zDistance = targetZ - (zPad + sourceZ_in_orig);
             shiftX = zDistance * baseSlope;
-            
-            % Apply geometric transformation
-            translated_slice = imtranslate(array(:,:,sourceZ_in_orig), [shiftX, 0], 'Method', 'cubic', 'FillValues', 0);
-            
-            % The previous transformation creates empty regions filled with zeros, now we will fill these with a gaussian noise to better simulate camera noise.
-            % Calculate affected columns + 1 extra column
-            colsToReplace = ceil(abs(shiftX)) + 1;
-            
+
+            translated_slice = imtranslate( ...
+                array(:, :, sourceZ_in_orig), ...
+                [shiftX, 0], ...
+                'Method', 'cubic', ...
+                'FillValues', 0);
+
+            % Fill empty translated regions with Gaussian camera-like noise.
+            colsToReplace = min(nx, ceil(abs(shiftX)) + 1);
+
             if colsToReplace > 0
-                % Generate Gaussian noise
-                noise_cols = cast(config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), 'like', array);
-                
+                noise_cols = cast( ...
+                    config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), ...
+                    'like', array);
+
                 if shiftX > 0
-                    % Image shifted right -> empty space is on the left
+                    % Image shifted right -> empty space on the left
                     translated_slice(:, 1:colsToReplace) = noise_cols;
-                else
-                    % Image shifted left -> empty space is on the right
-                    translated_slice(:, (nx - colsToReplace + 1):nx) = noise_cols;
+                elseif shiftX < 0
+                    % Image shifted left -> empty space on the right
+                    translated_slice(:, nx - colsToReplace + 1 : nx) = noise_cols;
                 end
             end
-            
-            paddedArray(:,:,targetZ) = translated_slice;
-        end        
-        % 3. TOP PADDING (Slices zPad+nz+1 to totalZ)
+
+            paddedArray(:, :, targetZ) = translated_slice;
+        end
+
+        % 4. TOP Z PADDING
         for i = 1:zPad
             targetZ = zPad + nz + i;
-            sourceZ_in_orig = nz - i + 1;
+            sourceZ_in_orig = topSourceZ(i);
+
+            % Distance in padded-Z coordinates between target slice and the
+            % source real slice. This preserves the skew translation.
             zDistance = targetZ - (zPad + sourceZ_in_orig);
             shiftX = zDistance * baseSlope;
-            
-            % Apply geometric transformation
-            translated_slice = imtranslate(array(:,:,sourceZ_in_orig), [shiftX, 0], 'Method', 'cubic', 'FillValues', 0);
-            
-            % The previous transformation creates empty regions filled with zeros, now we will fill these with a gaussian noise to better simulate camera noise.
-            % Calculate affected columns + 1 extra column
-            colsToReplace = ceil(abs(shiftX)) + 1;            
+
+            translated_slice = imtranslate( ...
+                array(:, :, sourceZ_in_orig), ...
+                [shiftX, 0], ...
+                'Method', 'cubic', ...
+                'FillValues', 0);
+
+            % Fill empty translated regions with Gaussian camera-like noise.
+            colsToReplace = min(nx, ceil(abs(shiftX)) + 1);
+
             if colsToReplace > 0
-                % Generate Gaussian noise
-                noise_cols = cast(config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), 'like', array);                
+                noise_cols = cast( ...
+                    config.gaussian_mean + config.gaussian_std .* randn(ny, colsToReplace), ...
+                    'like', array);
+
                 if shiftX > 0
-                    % Image shifted right -> empty space is on the left
+                    % Image shifted right -> empty space on the left
                     translated_slice(:, 1:colsToReplace) = noise_cols;
-                else
-                    % Image shifted left -> empty space is on the right
-                    translated_slice(:, (nx - colsToReplace + 1):nx) = noise_cols;
+                elseif shiftX < 0
+                    % Image shifted left -> empty space on the right
+                    translated_slice(:, nx - colsToReplace + 1 : nx) = noise_cols;
                 end
-            end            
-            paddedArray(:,:,targetZ) = translated_slice;
-        end       
+            end
+
+            paddedArray(:, :, targetZ) = translated_slice;
+        end
     case 'gaussian'
         frontPad = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
         backPad  = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
