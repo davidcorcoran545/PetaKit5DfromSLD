@@ -14,6 +14,13 @@ function config = getDefaultConfig()
     config.dz = 0.5;
     config.xyPixelSize = 0.104;
     
+    % xy–axis padding settings.
+    config.xy_edge_padding = 'mirror';  % Options: 'none', 'mirror'
+    config.xy_padding = 32;             % Minimum pixels to add on each side in X and Y
+    % Independent axis toggles
+    config.xy_pad_x = false;
+    config.xy_pad_y = false;
+
     % z–axis padding settings.
     config.z_edge_padding = 'mirror';   % Options: 'none', 'zero', 'mirror', 'gaussian', 'fixed'
     config.z_padding = 30;  % this needs to come with a warning about not padding more than half the size of the stack

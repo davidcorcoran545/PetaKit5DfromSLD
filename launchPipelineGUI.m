@@ -21,10 +21,10 @@ function [uiResult, canceled] = launchPipelineGUI()
     cfg          = uiState.config;
 
     % Increase the below if you add more features to give more room
-    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 700]);
+    fig = uifigure('Name', 'Modular Pipeline Configuration', 'Position', [100, 100, 520, 790]);
 
     % --- 1. Folders ---
-    yPos = 670; 
+    yPos = 760; 
     uilabel(fig, 'Position', [20, yPos, 400, 22], 'Text', '1. Select Folders', 'FontWeight', 'bold');
     
     yPos = yPos - 30;
@@ -110,7 +110,38 @@ function [uiResult, canceled] = launchPipelineGUI()
         'Limits', [0 Inf], ...
         'RoundFractionalValues', true);
     editZPad.Enable = matlab.lang.OnOffSwitchState(chkZPad.Value);
-    chkZPad.ValueChangedFcn = @(src,event) set(editZPad, 'Enable', matlab.lang.OnOffSwitchState(src.Value))
+    chkZPad.ValueChangedFcn = @(src,event) set(editZPad, 'Enable', matlab.lang.OnOffSwitchState(src.Value));
+
+    % --- XY Padding Settings ---
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 260, 22], ...
+        'Text', 'XY padding for deconvolution:', ...
+        'FontWeight', 'bold');
+
+    yPos = yPos - 25;
+    chkXPad = uicheckbox(fig, 'Position', [30, yPos, 220, 22], ...
+        'Text', 'Pad X with mirror padding', ...
+        'Value', cfg.xy_pad_x);
+
+    yPos = yPos - 25;
+    chkYPad = uicheckbox(fig, 'Position', [30, yPos, 220, 22], ...
+        'Text', 'Pad Y with mirror padding', ...
+        'Value', cfg.xy_pad_y);
+
+    yPos = yPos - 30;
+    uilabel(fig, 'Position', [20, yPos, 220, 22], ...
+        'Text', 'Minimum XY pad per side:');
+
+    editXYPad = uieditfield(fig, 'numeric', ...
+        'Position', [250, yPos, 80, 22], ...
+        'Value', cfg.xy_padding, ...
+        'Limits', [0 Inf], ...
+        'RoundFractionalValues', true);
+
+    chkXPad.ValueChangedFcn = @(src,event) updateXYPaddingControls();
+    chkYPad.ValueChangedFcn = @(src,event) updateXYPaddingControls();
+
+    updateXYPaddingControls();
 
     % --- 5. File Management ---
     yPos = yPos - 40;
@@ -137,6 +168,11 @@ function [uiResult, canceled] = launchPipelineGUI()
         if selectedFolder ~= 0
             lblTarget.Text = selectedFolder;
         end
+    end  
+
+    function updateXYPaddingControls()
+        xyPaddingEnabled = chkXPad.Value || chkYPad.Value;
+        editXYPad.Enable = matlab.lang.OnOffSwitchState(xyPaddingEnabled);
     end
 
     function runPipeline(~, ~)
@@ -159,6 +195,17 @@ function [uiResult, canceled] = launchPipelineGUI()
             baseConfig.z_edge_padding = 'mirror';
         else
             baseConfig.z_edge_padding = 'none';
+        end
+
+        % X/Y padding settings
+        baseConfig.xy_pad_x = chkXPad.Value;
+        baseConfig.xy_pad_y = chkYPad.Value;
+        baseConfig.xy_padding = editXYPad.Value;
+
+        if baseConfig.xy_pad_x || baseConfig.xy_pad_y
+            baseConfig.xy_edge_padding = 'mirror';
+        else
+            baseConfig.xy_edge_padding = 'none';
         end
 
         % File deletion logic:
@@ -282,11 +329,14 @@ function cfg = mergeSavedConfig(defaultCfg, savedCfg)
     cfg.DeconIter   = pickNumeric(savedCfg, 'DeconIter',   defaultCfg.DeconIter,   @(x) isfinite(x) && x >= 1 && mod(x,1)==0);
     cfg.Background  = pickNumeric(savedCfg, 'Background',  defaultCfg.Background,  @(x) isfinite(x) && x >= 0);
     cfg.z_padding   = pickNumeric(savedCfg, 'z_padding',   defaultCfg.z_padding,   @(x) isfinite(x) && x >= 0 && mod(x,1)==0);
+    cfg.xy_padding = pickNumeric(savedCfg, 'xy_padding', defaultCfg.xy_padding, @(x) isfinite(x) && x >= 0 && mod(x,1)==0);    
 
     % Logicals
     cfg.deleteRawTif   = pickLogical(savedCfg, 'deleteRawTif',   defaultCfg.deleteRawTif);
     cfg.deleteDeconTif = pickLogical(savedCfg, 'deleteDeconTif', defaultCfg.deleteDeconTif);
     cfg.rotate         = pickLogical(savedCfg, 'rotate',         defaultCfg.rotate);
+    cfg.xy_pad_x = pickLogical(savedCfg, 'xy_pad_x', defaultCfg.xy_pad_x);
+    cfg.xy_pad_y = pickLogical(savedCfg, 'xy_pad_y', defaultCfg.xy_pad_y);
 
     % Enums / strings
     cfg.processingMode = pickEnum(savedCfg, 'processingMode', ...
@@ -297,11 +347,24 @@ function cfg = mergeSavedConfig(defaultCfg, savedCfg)
 
     cfg.z_edge_padding = pickEnum(savedCfg, 'z_edge_padding', ...
         {'none','zero','mirror','gaussian','fixed'}, defaultCfg.z_edge_padding);
+    cfg.xy_edge_padding = pickEnum(savedCfg, 'xy_edge_padding', ...
+        {'none','mirror'}, defaultCfg.xy_edge_padding);
 
     % Normalise
     if strcmpi(cfg.deconAlgorithm, 'petakit5d')
         cfg.deconAlgorithm = 'PetaKit5D';
     end
+
+    % Keep XY padding fields internally consistent
+    if ~cfg.xy_pad_x && ~cfg.xy_pad_y
+        cfg.xy_edge_padding = 'none';
+    elseif strcmpi(cfg.xy_edge_padding, 'none')
+        cfg.xy_pad_x = false;
+        cfg.xy_pad_y = false;
+    else
+        cfg.xy_edge_padding = 'mirror';
+    end 
+
 end
 
 function out = sanitizeConfigForSave(cfg)

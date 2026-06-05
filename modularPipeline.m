@@ -281,6 +281,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     stackSizeC = size_metadata.stackSizeC;
     stackSizeZ = size_metadata.stackSizeZ;
 
+
     % 2. Pre-fetch one plane to get dimensions/type for workers
     sample_plane = bfGetPlane(r, 1);
     [actualRows, actualCols] = size(sample_plane);
@@ -289,10 +290,24 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     % Evaluate padding requirement outside the loop
     applyPaddingFlag = strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both');
 
+    % Pre-compute X/Y padding once per series.
+    % Padding is applied only to deconvolution inputs, not deskew-only inputs.
+    xyPadInfo = [];
+    if applyPaddingFlag
+        xyPadInfo = getSymmetricXYGoodPaddingInfo(actualRows, actualCols, config);
+
+        fprintf(['XY mirror padding settings: X=%d, Y=%d. ', ...
+            'Y %d -> %d, pad each side = %d; ', ...
+            'X %d -> %d, pad each side = %d\n'], ...
+            xyPadInfo.padXEnabled, xyPadInfo.padYEnabled, ...
+            xyPadInfo.originalY, xyPadInfo.targetY, xyPadInfo.padY, ...
+            xyPadInfo.originalX, xyPadInfo.targetX, xyPadInfo.padX);
+    end
+
     fprintf('Starting parallel conversion of %d timepoints...\n', stackSizeT);
 
     % --- BEGIN PARALLEL PROCESSING ---
-    
+
     % Initialize ONE reader per worker to prevent network lock collisions 
     % and massive metadata parsing overhead.
     readerFactory = @() initWorkerReader(sldFileName, seriesIndex);
@@ -351,24 +366,34 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
             strT = pad(num2str(T), 4, 'left', '0');
             strC = num2str(C);
             tifFileName = fullfile(tifDir, sprintf('%s_S%s_T%s_Ch%s.tif', baseFileName, strS, strT, strC));
-            
+
             % Check rotation once to save repetition
             rotateY = isfield(config,'skewDirection') && strcmpi(config.skewDirection, 'Y');
 
-            % Write and optionally pad the tif file depending on the processing mode 
+            % Write and optionally pad the tif file depending on the processing mode
             if strcmp(config.processingMode, 'deskew-only')
                 if rotateY, baseOutputArray = rot90(baseOutputArray, 1); end
                 parallelWriteTiff(tifFileName, baseOutputArray);
-                
+
             elseif strcmp(config.processingMode, 'decon+deskew')
                 paddedArray = applyZPadding(baseOutputArray, config);
-                if rotateY, paddedArray = rot90(paddedArray, 1); end
+
+                % New: mirror-pad X/Y after Z padding
+                paddedArray = applyXYSymmetricMirrorPadding(paddedArray, xyPadInfo);
+
+                if rotateY
+                    paddedArray = rot90(paddedArray, 1);
+                end
+
                 parallelWriteTiff(tifFileName, paddedArray);
-                
+
             elseif isBothMode
                 % Create both versions in memory
                 paddedArray = applyZPadding(baseOutputArray, config);
-                
+
+                % New: mirror-pad X/Y after Z padding for the decon input only
+                paddedArray = applyXYSymmetricMirrorPadding(paddedArray, xyPadInfo);
+
                 if rotateY
                     baseOutputArray = rot90(baseOutputArray, 1);
                     paddedArray = rot90(paddedArray, 1);
@@ -394,7 +419,8 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     seriesResult.frameInterval = frameInterval;
     seriesResult.pixelSizeX = size_metadata.pixelSizeX;
     seriesResult.pixelSizeY = size_metadata.pixelSizeY;
-    seriesResult.deskewedZSpacing = deskewedZSpacing;    
+    seriesResult.deskewedZSpacing = deskewedZSpacing;
+    seriesResult.xyPadInfo = xyPadInfo;
     
 end
 
@@ -476,6 +502,7 @@ function seriesResult = processTifFolder(config)
     seriesResult.frameInterval = 0;  % Default if metadata is unavailable.
     seriesResult.pixelSizeX = config.xyPixelSize;
     seriesResult.deskewedZSpacing = sin(deg2rad(config.skewAngle)) * config.dz;
+    seriesResult.xyPadInfo = [];
 end
 
 %% -----------------------------------------------------------------------
@@ -581,6 +608,203 @@ end
 end
 
 %% -----------------------------------------------------------------------
+%% Local Function: getSymmetricXYGoodPaddingInfo
+function padInfo = getSymmetricXYGoodPaddingInfo(ny, nx, config)
+% Calculates symmetric mirror-padding amounts for X and Y.
+%
+% Requirements:
+%   1. At least config.xy_padding pixels on each enabled side
+%   2. Final enabled X/Y sizes are independently good for cuFFT
+%   3. Good sizes factor only into 2, 3, 5, and 7
+%
+% Assumes array layout:
+%   array(Y, X, Z)
+
+if ~isfield(config, 'xy_edge_padding') || isempty(config.xy_edge_padding)
+    config.xy_edge_padding = 'mirror';
+end
+
+if ~isfield(config, 'xy_padding') || isempty(config.xy_padding)
+    config.xy_padding = 32;
+end
+
+if ~isfield(config, 'xy_pad_x') || isempty(config.xy_pad_x)
+    config.xy_pad_x = true;
+end
+
+if ~isfield(config, 'xy_pad_y') || isempty(config.xy_pad_y)
+    config.xy_pad_y = true;
+end
+
+padInfo.method = config.xy_edge_padding;
+padInfo.originalY = ny;
+padInfo.originalX = nx;
+padInfo.padXEnabled = logical(config.xy_pad_x);
+padInfo.padYEnabled = logical(config.xy_pad_y);
+
+% Default: no padding
+padInfo.padY = 0;
+padInfo.padX = 0;
+padInfo.targetY = ny;
+padInfo.targetX = nx;
+
+% If globally disabled, return no padding
+if strcmpi(config.xy_edge_padding, 'none')
+    return;
+end
+
+if ~strcmpi(config.xy_edge_padding, 'mirror')
+    error('Unsupported xy_edge_padding option: %s', config.xy_edge_padding);
+end
+
+% Independently enable Y padding
+if padInfo.padYEnabled
+    padInfo.padY = getOptimalSymmetricPadAmount(ny, config.xy_padding);
+    padInfo.targetY = ny + 2 * padInfo.padY;
+end
+
+% Independently enable X padding
+if padInfo.padXEnabled
+    padInfo.padX = getOptimalSymmetricPadAmount(nx, config.xy_padding);
+    padInfo.targetX = nx + 2 * padInfo.padX;
+end
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: getOptimalSymmetricPadAmount
+function padAmount = getOptimalSymmetricPadAmount(origSize, minPad)
+% Finds the smallest symmetric padding amount such that:
+%
+%   targetSize = origSize + 2 * padAmount
+%
+% is a good FFT size.
+%
+% Good FFT sizes here are those whose prime factors are only:
+%   2, 3, 5, 7
+
+allowedPrimes = [2, 3, 5, 7];
+
+targetSize = origSize + 2 * minPad;
+
+while true
+    f = factor(targetSize);
+
+    if isempty(f) || all(ismember(f, allowedPrimes))
+        break;
+    end
+
+    % Increment by 2 so the padding remains symmetric
+    targetSize = targetSize + 2;
+end
+
+padAmount = (targetSize - origSize) / 2;
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: applyXYSymmetricMirrorPadding
+function paddedArray = applyXYSymmetricMirrorPadding(array, padInfo)
+% Applies symmetric mirror padding in Y and X.
+%
+% This uses reflection without duplicating the edge pixel.
+%
+% Assumes array layout:
+%   array(Y, X, Z)
+
+if isempty(padInfo) || strcmpi(padInfo.method, 'none')
+    paddedArray = array;
+    return;
+end
+
+if ~strcmpi(padInfo.method, 'mirror')
+    error('Unsupported XY padding method: %s', padInfo.method);
+end
+
+idxY = mirrorIndexVector(size(array, 1), padInfo.padY, padInfo.padY);
+idxX = mirrorIndexVector(size(array, 2), padInfo.padX, padInfo.padX);
+
+paddedArray = array(idxY, idxX, :);
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: removeXYSymmetricPadding
+function imgOut = removeXYSymmetricPadding(imgIn, padInfo, rotateY)
+% Removes symmetric X/Y padding after deconvolution.
+%
+% If skewDirection == 'Y', your pipeline applies:
+%
+%   rot90(paddedArray, 1)
+%
+% before writing the decon input TIFF.
+%
+% Therefore, after deconvolution, the padded X dimension maps to rows,
+% and the padded Y dimension maps to columns.
+
+if isempty(padInfo) || strcmpi(padInfo.method, 'none')
+    imgOut = imgIn;
+    return;
+end
+
+if rotateY
+    % After rot90(..., 1):
+    %   rows correspond to original X
+    %   columns correspond to original Y
+    padRows = padInfo.padX;
+    padCols = padInfo.padY;
+else
+    % Normal orientation:
+    %   rows correspond to Y
+    %   columns correspond to X
+    padRows = padInfo.padY;
+    padCols = padInfo.padX;
+end
+
+[szY, szX, ~] = size(imgIn);
+
+if szY <= 2 * padRows || szX <= 2 * padCols
+    error('Not enough X/Y size for padding removal. Image size is [%d, %d], padRows=%d, padCols=%d.', ...
+        szY, szX, padRows, padCols);
+end
+
+imgOut = imgIn( ...
+    (padRows + 1):(szY - padRows), ...
+    (padCols + 1):(szX - padCols), ...
+    :);
+end
+
+%% -----------------------------------------------------------------------
+%% Local Function: mirrorIndexVector
+function idx = mirrorIndexVector(n, padPre, padPost)
+% Creates reflected indices for mirror padding without duplicating edge pixels.
+%
+% Example:
+%   Original:
+%       [1 2 3 4]
+%
+%   padPre = 2, padPost = 3 gives index vector:
+%       [3 2 1 2 3 4 3 2 1]
+%
+% This is reflection padding rather than edge replication.
+
+if padPre == 0 && padPost == 0
+    idx = 1:n;
+    return;
+end
+
+if n < 2
+    error('Cannot mirror-pad a dimension of size less than 2.');
+end
+
+positions = (1 - padPre):(n + padPost);
+
+period = 2 * n - 2;
+
+idx = mod(positions - 1, period) + 1;
+
+over = idx > n;
+idx(over) = period - idx(over) + 2;
+end
+
+%% -----------------------------------------------------------------------
 %% Local Function: runDeconDeskewPipeline
 function runDeconDeskewPipeline(seriesResult, config)
     fprintf('Running deconvolution+deskew pipeline for series: %s\n', seriesResult.currentSeriesFolder);
@@ -630,10 +854,12 @@ function runDeconDeskewPipeline(seriesResult, config)
     if config.GPUJob && gpuDeviceCount('available') > 0
          reset(gpuDevice);
     end
-    
-    % Remove z-padding from the decon results, before we deskew.
+
+
+    % Remove X/Y and Z padding from the decon results, before we deskew.
     deconDir = fullfile(seriesResult.tifDir, config.resultDirName);
-    removePaddingFromDir(deconDir, config);
+    removePaddingFromDir(deconDir, config, seriesResult);
+
 
     % --- Deskew step ---.
     dataPath_exps = fullfile(seriesResult.tifDir, config.resultDirName);
@@ -713,19 +939,40 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: removePaddingFromDir
-function removePaddingFromDir(targetDir, config)
+function removePaddingFromDir(targetDir, config, seriesResult)
+
     fileList = dir(fullfile(targetDir, '*.tif'));
-    if ~strcmp(config.z_edge_padding, 'none')
-        for i = 1:length(fileList)
-            filePath = fullfile(targetDir, fileList(i).name);
-            img = parallelReadTiff(filePath);
+
+    hasXYPadInfo = nargin >= 3 && ...
+                   isstruct(seriesResult) && ...
+                   isfield(seriesResult, 'xyPadInfo') && ...
+                   ~isempty(seriesResult.xyPadInfo);
+
+    rotateY = isfield(config, 'skewDirection') && strcmpi(config.skewDirection, 'Y');
+
+    for i = 1:length(fileList)
+        filePath = fullfile(targetDir, fileList(i).name);
+        img = parallelReadTiff(filePath);
+
+        % Remove X/Y padding first
+        if hasXYPadInfo
+            img = removeXYSymmetricPadding(img, seriesResult.xyPadInfo, rotateY);
+        end
+
+        % Remove Z padding second
+        if isfield(config, 'z_edge_padding') && ...
+                ~strcmp(config.z_edge_padding, 'none') && ...
+                isfield(config, 'z_padding') && ...
+                config.z_padding > 0
+
             if size(img, 3) > 2 * config.z_padding
-                img_no_padding = img(:, :, (config.z_padding+1):(end-config.z_padding));
-                parallelWriteTiff(filePath, img_no_padding);
+                img = img(:, :, (config.z_padding + 1):(end - config.z_padding));
             else
-                warning('Not enough depth for padding removal in file: %s', fileList(i).name);
+                warning('Not enough Z depth for padding removal in file: %s', fileList(i).name);
             end
         end
+
+        parallelWriteTiff(filePath, img);
     end
 end
 
