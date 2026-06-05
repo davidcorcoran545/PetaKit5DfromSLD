@@ -488,22 +488,64 @@ end
 
 %% -----------------------------------------------------------------------
 %% Local Function: processTifFolder
+% For a folder of existing 3D TIFF files, copy the usable raw TIFFs into
+% the output folder and run the downstream pipeline from there.
+%
+% This avoids writing intermediate results into the input folder and
+% prevents deleteIntermediateFiles() from deleting original input data.
 function seriesResult = processTifFolder(config)
-    % For a folder of TIFF files, assume that the folder itself contains the raw images.
-    tifDir = config.inputFolder;
-    [~, currentSeriesFolder, ~] = fileparts(tifDir);
+    inputTifDir = config.inputFolder;
+    
+    [~, currentSeriesFolder, ~] = fileparts(inputTifDir);
     if isempty(currentSeriesFolder)
-       currentSeriesFolder = 'raw_tif_series';
+        currentSeriesFolder = 'raw_tif_series';
+    end
+    
+    currentSeriesPath = fullfile(config.outputFolder, currentSeriesFolder);
+    
+    if ~exist(currentSeriesPath, 'dir')
+        mkdir(currentSeriesPath);
+    end
+    
+    tifDir = fullfile(currentSeriesPath, 'tifs');
+    
+    if ~exist(tifDir, 'dir')
+        mkdir(tifDir);
+    end
+    
+    % Copy only likely raw input TIFFs into the output working folder.
+    % Avoid copying already processed output files.
+    ignoreSuffixes = {'_decon.tif', '_deskew.tif', '_MAX.tif', '_decondeskew.tif'};
+    
+    allTifs = dir(fullfile(inputTifDir, '*.tif'));
+    allTifs = allTifs(~[allTifs.isdir]);
+    
+    for i = 1:length(allTifs)
+        srcName = allTifs(i).name;
+    
+        if endsWith(srcName, ignoreSuffixes, 'IgnoreCase', true)
+            continue;
+        end
+    
+        srcPath = fullfile(allTifs(i).folder, srcName);
+        dstPath = fullfile(tifDir, srcName);
+    
+        if ~exist(dstPath, 'file')
+            copyfile(srcPath, dstPath);
+        end
     end
     
     seriesResult.tifDir = tifDir;
+    seriesResult.tifDirUnpadded = fullfile(currentSeriesPath, 'tifs_unpadded');
     seriesResult.currentSeriesFolder = currentSeriesFolder;
-    seriesResult.currentSeriesPath = tifDir;
+    seriesResult.currentSeriesPath = currentSeriesPath;
     seriesResult.frameInterval = 0;  % Default if metadata is unavailable.
     seriesResult.pixelSizeX = config.xyPixelSize;
+    seriesResult.pixelSizeY = config.xyPixelSize;
     seriesResult.deskewedZSpacing = sin(deg2rad(config.skewAngle)) * config.dz;
     seriesResult.xyPadInfo = [];
 end
+
 
 %% -----------------------------------------------------------------------
 %% Local Function: applyZPadding
@@ -870,7 +912,7 @@ function runDeconDeskewPipeline(seriesResult, config)
         'masterCompute', config.masterCompute, 'configFile', config.configFile, 'mccMode', config.mccMode);
     
     % Merge the deconvolved+deskewed images.
-    outputTiffFile = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_decondeskew.tif']);
+    outputTiffFile = fullfile(config.outputFolder, [seriesResult.currentSeriesFolder, '_decondeskew.tif']);
     
     % If rotation is enabled then merge the 'DSR' folder, otherwise 'DS'    
     if config.rotate
@@ -885,7 +927,7 @@ function runDeconDeskewPipeline(seriesResult, config)
         paraMergeTiffFilesToMultiDimStack(deconDSDir, outputTiffFile, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval);
     end
 
-    outputTiffFileMax = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_decondeskew_MAX.tif']);
+    outputTiffFileMax = fullfile(config.outputFolder, [seriesResult.currentSeriesFolder, '_decondeskew_MAX.tif']);
     inputToMergeMax = fullfile(deconDSDir, 'MIPs');
     if isfield(config,'skewDirection')
         paraMergeMaxToStack(inputToMergeMax, outputTiffFileMax, seriesResult.pixelSizeX, seriesResult.frameInterval, config.skewDirection);
@@ -913,7 +955,7 @@ function runDeskewOnlyPipeline(seriesResult, config)
         'masterCompute', config.masterCompute, 'configFile', config.configFile, 'mccMode', config.mccMode);
     
     % Merge the deskew-only images.
-    outputTiffFileDeskew = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_deskew.tif']);
+    outputTiffFileDeskew = fullfile(config.outputFolder, [seriesResult.currentSeriesFolder, '_deskew.tif']);
     
     % If rotation is enabled then merge the 'DSR' folder, otherwise 'DS'
     if config.rotate
@@ -928,7 +970,7 @@ function runDeskewOnlyPipeline(seriesResult, config)
         paraMergeTiffFilesToMultiDimStack(deskewDSDir, outputTiffFileDeskew, seriesResult.pixelSizeX, seriesResult.deskewedZSpacing, seriesResult.frameInterval);
     end
     
-    outputTiffFileDeskewMax = fullfile(config.inputFolder, [seriesResult.currentSeriesFolder, '_deskew_MAX.tif']);
+    outputTiffFileDeskewMax = fullfile(config.outputFolder, [seriesResult.currentSeriesFolder, '_deskew_MAX.tif']);
     inputToMergeDeskewMax = fullfile(deskewDSDir, 'MIPs');
     if isfield(config,'skewDirection')
         paraMergeMaxToStack(inputToMergeDeskewMax, outputTiffFileDeskewMax, seriesResult.pixelSizeX, seriesResult.frameInterval, config.skewDirection);
