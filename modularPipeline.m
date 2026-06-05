@@ -290,10 +290,19 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     % Evaluate padding requirement outside the loop
     applyPaddingFlag = strcmp(config.processingMode, 'decon+deskew') || strcmp(config.processingMode, 'both');
 
-    % Pre-compute X/Y padding once per series.
+    % Pre-compute Z and X/Y padding once per series.
     % Padding is applied only to deconvolution inputs, not deskew-only inputs.
     xyPadInfo = [];
+    zPadInfo = [];
+
     if applyPaddingFlag
+        zPadInfo = getSymmetricZGoodPaddingInfo(stackSizeZ, config);
+
+        fprintf(['Z padding settings: method=%s. ', ...
+            'Z %d -> %d, pad each side = %d\n'], ...
+            zPadInfo.method, ...
+            zPadInfo.originalZ, zPadInfo.targetZ, zPadInfo.padZ);
+
         xyPadInfo = getSymmetricXYGoodPaddingInfo(actualRows, actualCols, config);
 
         fprintf(['XY mirror padding settings: X=%d, Y=%d. ', ...
@@ -376,7 +385,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
                 parallelWriteTiff(tifFileName, baseOutputArray);
 
             elseif strcmp(config.processingMode, 'decon+deskew')
-                paddedArray = applyZPadding(baseOutputArray, config);
+                paddedArray = applyZPadding(baseOutputArray, config, zPadInfo);
 
                 % New: mirror-pad X/Y after Z padding
                 paddedArray = applyXYSymmetricMirrorPadding(paddedArray, xyPadInfo);
@@ -389,7 +398,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
 
             elseif isBothMode
                 % Create both versions in memory
-                paddedArray = applyZPadding(baseOutputArray, config);
+                paddedArray = applyZPadding(baseOutputArray, config, zPadInfo);
 
                 % New: mirror-pad X/Y after Z padding for the decon input only
                 paddedArray = applyXYSymmetricMirrorPadding(paddedArray, xyPadInfo);
@@ -421,6 +430,7 @@ function seriesResult = convertSeriesToTif(r, seriesIndex, sldFileName, config, 
     seriesResult.pixelSizeY = size_metadata.pixelSizeY;
     seriesResult.deskewedZSpacing = deskewedZSpacing;
     seriesResult.xyPadInfo = xyPadInfo;
+    seriesResult.zPadInfo = zPadInfo;
     
 end
 
@@ -547,21 +557,36 @@ function seriesResult = processTifFolder(config)
 end
 
 
+
+
+
 %% -----------------------------------------------------------------------
 %% Local Function: applyZPadding
-function paddedArray = applyZPadding(array, config)
+function paddedArray = applyZPadding(array, config, zPadInfo)
+
+if nargin < 3 || isempty(zPadInfo)
+    zPadInfo = getSymmetricZGoodPaddingInfo(size(array, 3), config);
+end
+
+zPad = zPadInfo.padZ;
+
 switch config.z_edge_padding
     case 'none'
         paddedArray = array;
+
     case 'zero'
-        paddedArray = padarray(array, [0, 0, config.z_padding], 0, 'both');
+        if zPad == 0
+            paddedArray = array;
+        else
+            paddedArray = padarray(array, [0, 0, zPad], 0, 'both');
+        end
+
     case 'mirror'
         % Mirrors the skewed data, then skews the padded areas for realism,
         % Does not duplicate the first or last real slice.
         % Needs testing more.
 
         [ny, nx, nz] = size(array);
-        zPad = config.z_padding;
 
         if zPad == 0
             paddedArray = array;
@@ -573,9 +598,8 @@ switch config.z_edge_padding
         end
 
         % --- SLOPE CALCULATION ---
-        % z_step / x_pixel * tan(skewAngle)
-        % Theoretical slope is ~-3.0978 pixels for 0.5 / 0.104 at 32.8 deg.
-        % Using -3.55 as current empirical working estimate.
+        % Current empirical working estimate.
+        % In future, this could be calculated from dz, xyPixelSize and skewAngle.
         baseSlope = -3.55;
 
         % --- INITIALIZE PADDED ARRAY ---
@@ -585,7 +609,7 @@ switch config.z_edge_padding
         % 1. PLACE ORIGINAL DATA IN THE CENTER
         paddedArray(:, :, zPad + 1 : zPad + nz) = array;
 
-        % 2. Build Z reflection indices without duplicating edge slices.
+        % 2. BUILD Z REFLECTION INDICES WITHOUT DUPLICATING EDGE SLICES
         zIdxWithPrePad  = mirrorIndexVector(nz, zPad, 0);
         zIdxWithPostPad = mirrorIndexVector(nz, 0, zPad);
 
@@ -597,8 +621,6 @@ switch config.z_edge_padding
             targetZ = i;
             sourceZ_in_orig = bottomSourceZ(i);
 
-            % Distance in padded-Z coordinates between target slice and the
-            % source real slice. This preserves the skew translation.
             zDistance = targetZ - (zPad + sourceZ_in_orig);
             shiftX = zDistance * baseSlope;
 
@@ -608,7 +630,6 @@ switch config.z_edge_padding
                 'Method', 'cubic', ...
                 'FillValues', 0);
 
-            % Fill empty translated regions with Gaussian camera-like noise.
             colsToReplace = min(nx, ceil(abs(shiftX)) + 1);
 
             if colsToReplace > 0
@@ -617,10 +638,8 @@ switch config.z_edge_padding
                     'like', array);
 
                 if shiftX > 0
-                    % Image shifted right -> empty space on the left
                     translated_slice(:, 1:colsToReplace) = noise_cols;
                 elseif shiftX < 0
-                    % Image shifted left -> empty space on the right
                     translated_slice(:, nx - colsToReplace + 1 : nx) = noise_cols;
                 end
             end
@@ -633,8 +652,6 @@ switch config.z_edge_padding
             targetZ = zPad + nz + i;
             sourceZ_in_orig = topSourceZ(i);
 
-            % Distance in padded-Z coordinates between target slice and the
-            % source real slice. This preserves the skew translation.
             zDistance = targetZ - (zPad + sourceZ_in_orig);
             shiftX = zDistance * baseSlope;
 
@@ -644,7 +661,6 @@ switch config.z_edge_padding
                 'Method', 'cubic', ...
                 'FillValues', 0);
 
-            % Fill empty translated regions with Gaussian camera-like noise.
             colsToReplace = min(nx, ceil(abs(shiftX)) + 1);
 
             if colsToReplace > 0
@@ -653,28 +669,85 @@ switch config.z_edge_padding
                     'like', array);
 
                 if shiftX > 0
-                    % Image shifted right -> empty space on the left
                     translated_slice(:, 1:colsToReplace) = noise_cols;
                 elseif shiftX < 0
-                    % Image shifted left -> empty space on the right
                     translated_slice(:, nx - colsToReplace + 1 : nx) = noise_cols;
                 end
             end
 
             paddedArray(:, :, targetZ) = translated_slice;
         end
+
     case 'gaussian'
-        frontPad = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
-        backPad  = config.gaussian_mean + config.gaussian_std .* randn(size(array,1), size(array,2), config.z_padding);
-        paddedArray = cat(3, frontPad, array, backPad);
+        if zPad == 0
+            paddedArray = array;
+        else
+            frontPad = config.gaussian_mean + config.gaussian_std .* ...
+                randn(size(array, 1), size(array, 2), zPad);
+            backPad = config.gaussian_mean + config.gaussian_std .* ...
+                randn(size(array, 1), size(array, 2), zPad);
+
+            frontPad = cast(frontPad, 'like', array);
+            backPad  = cast(backPad,  'like', array);
+
+            paddedArray = cat(3, frontPad, array, backPad);
+        end
+
     case 'fixed'
-        frontPad = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
-        backPad  = config.fixed_value * ones(size(array,1), size(array,2), config.z_padding);
-        paddedArray = cat(3, frontPad, array, backPad);
+        if zPad == 0
+            paddedArray = array;
+        else
+            frontPad = cast(config.fixed_value * ...
+                ones(size(array, 1), size(array, 2), zPad), 'like', array);
+            backPad = cast(config.fixed_value * ...
+                ones(size(array, 1), size(array, 2), zPad), 'like', array);
+
+            paddedArray = cat(3, frontPad, array, backPad);
+        end
+
     otherwise
         error('Invalid z_edge_padding option: %s', config.z_edge_padding);
 end
 
+end
+
+function padInfo = getSymmetricZGoodPaddingInfo(nz, config)
+% Calculates symmetric Z padding so the final Z size is good for FFT/GPU use.
+%
+% Requirements:
+%   1. At least config.z_padding slices on each side, if Z padding is enabled
+%   2. Final Z size is good for cuFFT-style FFT performance
+%   3. Good sizes factor only into 2, 3, 5, and 7
+%
+% Assumes array layout:
+%   array(Y, X, Z)
+if ~isfield(config, 'z_edge_padding') || isempty(config.z_edge_padding)
+    config.z_edge_padding = 'none';
+end
+
+if ~isfield(config, 'z_padding') || isempty(config.z_padding)
+    config.z_padding = 0;
+end
+
+padInfo.method = config.z_edge_padding;
+padInfo.originalZ = nz;
+padInfo.padZ = 0;
+padInfo.targetZ = nz;
+
+% If globally disabled, return no padding.
+if strcmpi(config.z_edge_padding, 'none')
+    return;
+end
+
+minPad = max(0, round(config.z_padding));
+
+% If requested Z padding is zero, leave unchanged.
+if minPad == 0
+    return;
+end
+
+padInfo.padZ = getOptimalSymmetricPadAmount(nz, minPad);
+padInfo.targetZ = nz + 2 * padInfo.padZ;
 end
 
 %% -----------------------------------------------------------------------
@@ -1029,14 +1102,29 @@ function removePaddingFromDir(targetDir, config, seriesResult)
             img = removeXYSymmetricPadding(img, seriesResult.xyPadInfo, rotateY);
         end
 
-        % Remove Z padding second
-        if isfield(config, 'z_edge_padding') && ...
-                ~strcmp(config.z_edge_padding, 'none') && ...
-                isfield(config, 'z_padding') && ...
-                config.z_padding > 0
+        % Remove Z padding second.
+        % Use the actual calculated GPU-friendly Z pad, not just config.z_padding.
+        zPadToRemove = 0;
 
-            if size(img, 3) > 2 * config.z_padding
-                img = img(:, :, (config.z_padding + 1):(end - config.z_padding));
+        if nargin >= 3 && ...
+                isstruct(seriesResult) && ...
+                isfield(seriesResult, 'zPadInfo') && ...
+                ~isempty(seriesResult.zPadInfo) && ...
+                isfield(seriesResult.zPadInfo, 'padZ')
+
+            zPadToRemove = seriesResult.zPadInfo.padZ;
+
+        elseif isfield(config, 'z_edge_padding') && ...
+                ~strcmp(config.z_edge_padding, 'none') && ...
+                isfield(config, 'z_padding')
+
+            % Backwards-compatible fallback.
+            zPadToRemove = config.z_padding;
+        end
+
+        if zPadToRemove > 0
+            if size(img, 3) > 2 * zPadToRemove
+                img = img(:, :, (zPadToRemove + 1):(end - zPadToRemove));
             else
                 warning('Not enough Z depth for padding removal in file: %s', fileList(i).name);
             end
